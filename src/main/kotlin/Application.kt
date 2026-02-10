@@ -6,6 +6,8 @@ import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 
 val dotenv = dotenv()
+val DEBUG = dotenv["DEBUG"]?.toBoolean() ?: true
+
 fun main() {
     embeddedServer(
         factory = Netty,
