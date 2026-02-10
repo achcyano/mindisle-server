@@ -9,5 +9,9 @@ fun Application.configureRouting() {
         get("/") {
             call.respondText("CC世界第一强大！")
         }
+
+        post("/test"){
+            call.respondText("This is a test endpoint.")
+        }
     }
 }
