@@ -23,7 +23,7 @@ object UsersTable : LongIdTable("users") {
 
 object UserProfilesTable : Table("user_profiles") {
     val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
-    val fullName = varchar("full_name", 64).nullable()
+    val fullName = varchar("full_name", 200).nullable()
     val gender = enumerationByName("gender", 16, Gender::class).default(Gender.UNKNOWN)
     val birthDate = date("birth_date").nullable()
     val weightKg = decimal("weight_kg", 5, 2).nullable()
@@ -62,6 +62,18 @@ object SmsVerificationCodesTable : LongIdTable("sms_verification_codes") {
         index(false, phone, createdAt)
         index(false, phone, purpose, createdAt)
         index(false, phone, purpose, consumedAt)
+    }
+}
+
+object SmsVerificationAttemptsTable : LongIdTable("sms_verification_attempts") {
+    val phone = varchar("phone", 20)
+    val purpose = enumerationByName("purpose", 32, SmsPurpose::class)
+    val success = bool("success")
+    val createdAt = datetime("created_at")
+
+    init {
+        index(false, phone, purpose, createdAt)
+        index(false, phone, purpose, success, createdAt)
     }
 }
 

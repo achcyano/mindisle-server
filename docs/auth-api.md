@@ -36,6 +36,8 @@
 - `40901`: 该手机号已注册（注册发码/注册）。
 - `42901`: 短信请求过于频繁（60 秒限制）。
 - `42902`: 当日短信请求次数超过上限（默认 10 次）。
+- `42903`: 短信验证码校验失败次数过多，请稍后重试。
+- `50010`: 短信服务调用失败。
 
 ### 1.3 手机号格式
 当前仅支持中国大陆手机号（`1[3-9]` 开头共 11 位）。
@@ -86,7 +88,7 @@
 说明：
 - 同一个手机号 60 秒内只能获取一次验证码。
 - 每手机号每日最多请求 10 次验证码。
-- 短信发送通道目前是 TODO（服务端已预留）。
+- 验证码由短信服务商托管，服务端不再本地保存明文或可逆验证码。
 
 ## 3.2 注册
 `POST /auth/register`
@@ -331,6 +333,10 @@
 }
 ```
 
+字段限制：
+- `fullName` 最长 200 字符。
+- `familyHistory` / `medicalHistory` / `medicationHistory` 每个列表项最长 200 字符。
+
 成功响应：与 `3.9` 格式一致，返回更新后资料。
 
 ## 4. 失败响应示例
@@ -372,5 +378,17 @@
 3. 注册流程：先发码，再 `POST /auth/register`（必须带 `smsCode + password`）。
 4. token 过期后调用 `POST /auth/token/refresh`。
 5. 忘记密码走 `POST /auth/password/reset`。
+
+## 6. 短信通道配置
+
+- `SMS_PROVIDER=local`：本地模式，验证码仅用于开发调试。
+- `SMS_PROVIDER=aliyun`：阿里云托管验证码模式（`SendSmsVerifyCode` + `CheckSmsVerifyCode`）。
+- 阿里云模式至少需要：
+  - `ALIYUN_SMS_REGION`（默认 `cn-hangzhou`）
+  - `ALIBABA_CLOUD_ACCESS_KEY_ID`
+  - `ALIBABA_CLOUD_ACCESS_KEY_SECRET`
+  - `ALIYUN_SMS_SIGN_NAME`
+  - `ALIYUN_SMS_TEMPLATE_CODE`
+  - `ALIYUN_SMS_SCHEME_NAME`
 
 

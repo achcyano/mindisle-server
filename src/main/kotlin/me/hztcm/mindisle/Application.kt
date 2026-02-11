@@ -11,6 +11,7 @@ import me.hztcm.mindisle.config.AppConfig
 import me.hztcm.mindisle.db.DatabaseFactory
 import me.hztcm.mindisle.security.JwtService
 import me.hztcm.mindisle.security.configureAuth
+import me.hztcm.mindisle.sms.createSmsGateway
 import me.hztcm.mindisle.user.service.UserManagementService
 import kotlinx.serialization.json.Json
 
@@ -38,7 +39,8 @@ fun Application.module() {
     }
     DatabaseFactory.init(AppConfig.db)
     val jwtService = JwtService(AppConfig.auth)
-    val userService = UserManagementService(AppConfig.auth, jwtService)
+    val smsGateway = createSmsGateway(AppConfig.sms)
+    val userService = UserManagementService(AppConfig.auth, jwtService, smsGateway)
 
     configureStatusPages()
     configureAuth(jwtService)

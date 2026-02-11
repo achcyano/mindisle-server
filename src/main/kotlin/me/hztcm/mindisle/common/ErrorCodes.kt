@@ -17,4 +17,7 @@ object ErrorCodes {
 
     const val SMS_TOO_FREQUENT = 42901
     const val SMS_DAILY_LIMIT = 42902
+    const val SMS_VERIFY_TOO_MANY_ATTEMPTS = 42903
+
+    const val SMS_PROVIDER_ERROR = 50010
 }

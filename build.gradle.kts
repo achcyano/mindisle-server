@@ -34,6 +34,7 @@ dependencies {
     implementation(libs.mysql.connector)
     implementation(libs.java.jwt)
     implementation(libs.jbcrypt)
+    implementation(libs.aliyun.dypnsapi)
     testImplementation(libs.ktor.server.test.host)
     testImplementation(libs.kotlin.test.junit)
 }

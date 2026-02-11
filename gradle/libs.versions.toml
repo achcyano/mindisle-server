@@ -9,6 +9,7 @@ hikari = "6.2.1"
 mysql = "8.4.0"
 java-jwt = "4.4.0"
 jbcrypt = "0.4"
+aliyun-dypnsapi = "2.0.0"
 
 [libraries]
 ktor-server-core = { module = "io.ktor:ktor-server-core-jvm", version.ref = "ktor" }
@@ -31,6 +32,7 @@ hikari-cp = { module = "com.zaxxer:HikariCP", version.ref = "hikari" }
 mysql-connector = { module = "com.mysql:mysql-connector-j", version.ref = "mysql" }
 java-jwt = { module = "com.auth0:java-jwt", version.ref = "java-jwt" }
 jbcrypt = { module = "org.mindrot:jbcrypt", version.ref = "jbcrypt" }
+aliyun-dypnsapi = { module = "com.aliyun:alibabacloud-dypnsapi20170525", version.ref = "aliyun-dypnsapi" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

@@ -8,6 +8,7 @@ import me.hztcm.mindisle.config.AuthConfig
 import me.hztcm.mindisle.db.DatabaseFactory
 import me.hztcm.mindisle.db.LoginTicketsTable
 import me.hztcm.mindisle.db.SessionStatus
+import me.hztcm.mindisle.db.SmsVerificationAttemptsTable
 import me.hztcm.mindisle.db.SmsVerificationCodesTable
 import me.hztcm.mindisle.db.UserFamilyHistoriesTable
 import me.hztcm.mindisle.db.UserMedicalHistoriesTable
@@ -32,14 +33,13 @@ import me.hztcm.mindisle.model.UpsertProfileRequest
 import me.hztcm.mindisle.model.UserProfileResponse
 import me.hztcm.mindisle.security.JwtService
 import me.hztcm.mindisle.security.PasswordHasher
+import me.hztcm.mindisle.sms.SmsGateway
 import me.hztcm.mindisle.util.generateSecureToken
 import me.hztcm.mindisle.util.generateSmsCode
 import me.hztcm.mindisle.util.normalizePhone
 import me.hztcm.mindisle.util.sha256Hex
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.isNull
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
@@ -54,34 +54,66 @@ import java.time.ZoneOffset
 
 class UserManagementService(
     private val config: AuthConfig,
-    private val jwtService: JwtService
+    private val jwtService: JwtService,
+    private val smsGateway: SmsGateway?
 ) {
+    private companion object {
+        const val PROFILE_TEXT_MAX_LENGTH = 200
+    }
+
     suspend fun sendSmsCode(request: SendSmsCodeRequest, requestIp: String?) {
         val phone = normalizePhone(request.phone)
+        val now = LocalDateTime.now(ZoneOffset.UTC)
         DatabaseFactory.dbQuery {
-            val now = LocalDateTime.now(ZoneOffset.UTC)
             validateSmsBusinessRules(phone, request.purpose, now)
+        }
 
-            val code = generateSmsCode()
+        if (smsGateway == null) {
+            DatabaseFactory.dbQuery {
+                val code = generateSmsCode()
+                SmsVerificationCodesTable.insert {
+                    it[SmsVerificationCodesTable.phone] = phone
+                    it[SmsVerificationCodesTable.purpose] = request.purpose
+                    it[SmsVerificationCodesTable.codeHash] = sha256Hex(code)
+                    it[SmsVerificationCodesTable.expiresAt] = now.plusSeconds(config.smsCodeTtlSeconds)
+                    it[SmsVerificationCodesTable.createdAt] = now
+                    it[SmsVerificationCodesTable.requestIp] = requestIp
+                }
+                if (DEBUG) {
+                    println("Sms code generated in local provider, phone=$phone purpose=${request.purpose}")
+                }
+            }
+            return
+        }
+
+        val sendResult = smsGateway.sendSmsCode(
+            phone = phone,
+            purpose = request.purpose,
+            ttlSeconds = config.smsCodeTtlSeconds,
+            intervalSeconds = config.smsCooldownSeconds
+        )
+        DatabaseFactory.dbQuery {
             SmsVerificationCodesTable.insert {
                 it[SmsVerificationCodesTable.phone] = phone
                 it[SmsVerificationCodesTable.purpose] = request.purpose
-                it[SmsVerificationCodesTable.codeHash] = sha256Hex(code)
+                it[SmsVerificationCodesTable.codeHash] = sha256Hex(sendResult.outId ?: generateSecureToken(16))
                 it[SmsVerificationCodesTable.expiresAt] = now.plusSeconds(config.smsCodeTtlSeconds)
+                it[SmsVerificationCodesTable.consumedAt] = now
                 it[SmsVerificationCodesTable.createdAt] = now
                 it[SmsVerificationCodesTable.requestIp] = requestIp
             }
-            if (DEBUG) {
-                println("TODO: send sms code via provider, phone=$phone purpose=${request.purpose} code=$code")
-            } else {
-                println("TODO: send sms code via provider, phone=$phone purpose=${request.purpose}")
-            }
+        }
+        if (DEBUG) {
+            println(
+                "Sms code sent via provider, phone=$phone purpose=${request.purpose} outId=${sendResult.outId} bizId=${sendResult.bizId}"
+            )
         }
     }
 
     suspend fun register(request: RegisterRequest, deviceId: String): AuthResponse {
         val phone = normalizePhone(request.phone)
         validatePassword(request.password)
+        request.profile?.let { validateProfileUpdateRequest(it) }
         return DatabaseFactory.dbQuery {
             val now = LocalDateTime.now(ZoneOffset.UTC)
             val existing = UsersTable.selectAll().where { UsersTable.phone eq phone }.firstOrNull()
@@ -328,6 +360,7 @@ class UserManagementService(
     }
 
     suspend fun upsertProfile(userId: Long, request: UpsertProfileRequest): UserProfileResponse {
+        validateProfileUpdateRequest(request)
         return DatabaseFactory.dbQuery {
             val userEntityId = EntityID(userId, UsersTable)
             val user = UsersTable.selectAll().where { UsersTable.id eq userEntityId }.firstOrNull()
@@ -415,6 +448,14 @@ class UserManagementService(
         code: String,
         now: LocalDateTime
     ): Boolean {
+        if (smsGateway != null) {
+            ensureSmsVerificationAttemptAllowed(phone, purpose, now)
+            val success = smsGateway.verifySmsCode(phone = phone, purpose = purpose, code = code)
+            recordSmsVerificationAttempt(phone, purpose, success, now)
+            return success
+        }
+
+        ensureSmsVerificationAttemptAllowed(phone, purpose, now)
         val codeHash = sha256Hex(code)
         val row = SmsVerificationCodesTable.selectAll().where {
             (SmsVerificationCodesTable.phone eq phone) and
@@ -422,7 +463,11 @@ class UserManagementService(
                 (SmsVerificationCodesTable.codeHash eq codeHash) and
                 SmsVerificationCodesTable.consumedAt.isNull() and
                 (SmsVerificationCodesTable.expiresAt greaterEq now)
-        }.orderBy(SmsVerificationCodesTable.createdAt, SortOrder.DESC).limit(1).firstOrNull() ?: return false
+        }.orderBy(SmsVerificationCodesTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
+        if (row == null) {
+            recordSmsVerificationAttempt(phone, purpose, false, now)
+            return false
+        }
 
         val affected = SmsVerificationCodesTable.update({
             (SmsVerificationCodesTable.id eq row[SmsVerificationCodesTable.id]) and
@@ -430,7 +475,76 @@ class UserManagementService(
         }) {
             it[consumedAt] = now
         }
-        return affected > 0
+        val success = affected > 0
+        recordSmsVerificationAttempt(phone, purpose, success, now)
+        return success
+    }
+
+    private fun Transaction.ensureSmsVerificationAttemptAllowed(
+        phone: String,
+        purpose: SmsPurpose,
+        now: LocalDateTime
+    ) {
+        val windowStart = now.minusSeconds(config.smsVerifyWindowSeconds)
+        val latestSuccessAt = SmsVerificationAttemptsTable.selectAll().where {
+            (SmsVerificationAttemptsTable.phone eq phone) and
+                (SmsVerificationAttemptsTable.purpose eq purpose) and
+                (SmsVerificationAttemptsTable.success eq true)
+        }.orderBy(SmsVerificationAttemptsTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
+            ?.get(SmsVerificationAttemptsTable.createdAt)
+        val effectiveStart = if (latestSuccessAt != null && latestSuccessAt > windowStart) {
+            latestSuccessAt
+        } else {
+            windowStart
+        }
+        val failedAttempts = SmsVerificationAttemptsTable.selectAll().where {
+            (SmsVerificationAttemptsTable.phone eq phone) and
+                (SmsVerificationAttemptsTable.purpose eq purpose) and
+                (SmsVerificationAttemptsTable.success eq false) and
+                (SmsVerificationAttemptsTable.createdAt greaterEq effectiveStart)
+        }.count()
+        if (failedAttempts >= config.smsVerifyMaxAttempts) {
+            throw AppException(
+                code = ErrorCodes.SMS_VERIFY_TOO_MANY_ATTEMPTS,
+                message = "Sms code verification attempts exceeded, please retry later",
+                status = HttpStatusCode.TooManyRequests
+            )
+        }
+    }
+
+    private fun Transaction.recordSmsVerificationAttempt(
+        phone: String,
+        purpose: SmsPurpose,
+        success: Boolean,
+        now: LocalDateTime
+    ) {
+        SmsVerificationAttemptsTable.insert {
+            it[SmsVerificationAttemptsTable.phone] = phone
+            it[SmsVerificationAttemptsTable.purpose] = purpose
+            it[SmsVerificationAttemptsTable.success] = success
+            it[SmsVerificationAttemptsTable.createdAt] = now
+        }
+    }
+
+    private fun validateProfileUpdateRequest(request: UpsertProfileRequest) {
+        validateTextLength("fullName", request.fullName)
+        request.familyHistory?.forEach { validateTextLength("familyHistory item", it) }
+        request.medicalHistory?.forEach { validateTextLength("medicalHistory item", it) }
+        request.medicationHistory?.forEach { validateTextLength("medicationHistory item", it) }
+    }
+
+    private fun validateTextLength(fieldName: String, value: String?) {
+        if (value == null) {
+            return
+        }
+        val charCount = value.codePointCount(0, value.length)
+        if (charCount > PROFILE_TEXT_MAX_LENGTH) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "$fieldName exceeds $PROFILE_TEXT_MAX_LENGTH characters",
+                status = HttpStatusCode.BadRequest
+            )
+        }
     }
 
     private fun Transaction.issueTokenPair(
