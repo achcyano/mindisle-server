@@ -1,4 +1,4 @@
-rootProject.name = "mindisle"
+rootProject.name = "mindisle-server"
 
 dependencyResolutionManagement {
     repositories {

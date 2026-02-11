@@ -1,0 +1,46 @@
+package me.hztcm.mindisle
+
+import io.github.cdimascio.dotenv.dotenv
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.*
+import io.ktor.server.engine.*
+import io.ktor.server.netty.*
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import me.hztcm.mindisle.common.configureStatusPages
+import me.hztcm.mindisle.config.AppConfig
+import me.hztcm.mindisle.db.DatabaseFactory
+import me.hztcm.mindisle.security.JwtService
+import me.hztcm.mindisle.security.configureAuth
+import me.hztcm.mindisle.user.service.UserManagementService
+import kotlinx.serialization.json.Json
+
+val dotenv = dotenv()
+val DEBUG = dotenv["DEBUG"]?.toBoolean() ?: true
+
+fun main() {
+    embeddedServer(
+        factory = Netty,
+        port = dotenv["KTOR_HTTP_PORT"]?.toInt() ?: 8808,
+        host = "0.0.0.0",
+        module = Application::module
+    ).start(wait = true)
+}
+
+fun Application.module() {
+    install(ContentNegotiation) {
+        json(
+            Json {
+                prettyPrint = DEBUG
+                isLenient = true
+                ignoreUnknownKeys = true
+            }
+        )
+    }
+    DatabaseFactory.init(AppConfig.db)
+    val jwtService = JwtService(AppConfig.auth)
+    val userService = UserManagementService(AppConfig.auth, jwtService)
+
+    configureStatusPages()
+    configureAuth(jwtService)
+    configureRouting(userService)
+}
