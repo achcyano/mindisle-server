@@ -51,7 +51,6 @@ class AliyunSmsGateway(
                 "templateCode" to templateCode,
                 "templateParam" to templateParam,
                 "outId" to outId,
-                "schemeName" to config.aliyunSchemeName,
                 "codeType" to config.codeType,
                 "codeLength" to config.codeLength,
                 "validTime" to ttlSeconds,
@@ -89,7 +88,6 @@ class AliyunSmsGateway(
                 "phoneNumber" to phone,
                 "countryCode" to config.countryCode,
                 "verifyCode" to code,
-                "schemeName" to config.aliyunSchemeName,
                 "caseAuthPolicy" to config.caseAuthPolicy
             )
         )
@@ -256,11 +254,25 @@ class AliyunSmsGateway(
     }
 
     private fun ensureApiOk(body: Any, errorPrefix: String) {
+        val model = child(body, "getModel")
         val code = valueAsString(body, listOf("getCode", "code"))
+            ?: valueAsString(model, listOf("getCode", "code"))
         val message = valueAsString(body, listOf("getMessage", "message"))
+            ?: valueAsString(model, listOf("getMessage", "message"))
         val success = valueAsBoolean(body, listOf("getSuccess", "success"))
+            ?: valueAsBoolean(model, listOf("getSuccess", "success"))
+        val requestId = valueAsString(body, listOf("getRequestId", "requestId"))
+            ?: valueAsString(model, listOf("getRequestId", "requestId"))
+        val accessDeniedDetail = valueAsString(body, listOf("getAccessDeniedDetail", "accessDeniedDetail"))
         if (code != "OK" || success != true) {
-            throw providerError("$errorPrefix: code=$code, message=$message")
+            val details = mutableListOf(
+                "code=$code",
+                "message=$message",
+                "success=$success"
+            )
+            requestId?.let { details.add("requestId=$it") }
+            accessDeniedDetail?.takeIf { it.isNotBlank() }?.let { details.add("accessDeniedDetail=$it") }
+            throw providerError("$errorPrefix: ${details.joinToString(", ")}")
         }
     }
 
