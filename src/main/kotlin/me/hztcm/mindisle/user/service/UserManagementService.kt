@@ -379,6 +379,22 @@ class UserManagementService(
         }
     }
 
+    suspend fun deleteAccountByPhoneForDebug(phone: String) {
+        val normalizedPhone = normalizePhone(phone)
+        DatabaseFactory.dbQuery {
+            val user = UsersTable.selectAll().where { UsersTable.phone eq normalizedPhone }.firstOrNull()
+                ?: throw AppException(
+                    code = ErrorCodes.PHONE_NOT_REGISTERED,
+                    message = "Phone is not registered",
+                    status = HttpStatusCode.NotFound
+                )
+            val userId = user[UsersTable.id]
+            UsersTable.deleteWhere { UsersTable.id eq userId }
+            SmsVerificationCodesTable.deleteWhere { SmsVerificationCodesTable.phone eq normalizedPhone }
+            SmsVerificationAttemptsTable.deleteWhere { SmsVerificationAttemptsTable.phone eq normalizedPhone }
+        }
+    }
+
     private fun validatePassword(password: String) {
         if (password.length < 6) {
             throw AppException(

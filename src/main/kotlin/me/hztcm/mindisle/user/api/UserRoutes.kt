@@ -5,13 +5,16 @@ import io.ktor.server.auth.authenticate
 import io.ktor.server.auth.principal
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.routing.delete
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.put
 import io.ktor.server.routing.route
+import me.hztcm.mindisle.DEBUG
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
 import me.hztcm.mindisle.model.ApiResponse
+import me.hztcm.mindisle.model.DeleteAccountDebugRequest
 import me.hztcm.mindisle.model.UpsertProfileRequest
 import me.hztcm.mindisle.security.UserPrincipal
 import me.hztcm.mindisle.user.service.UserManagementService
@@ -40,6 +43,16 @@ fun Route.registerUserRoutes(service: UserManagementService) {
                 val request = call.receive<UpsertProfileRequest>()
                 val data = service.upsertProfile(principal.userId, request)
                 call.respond(ApiResponse(data = data))
+            }
+        }
+    }
+
+    if (DEBUG) {
+        route("/users") {
+            delete {
+                val request = call.receive<DeleteAccountDebugRequest>()
+                service.deleteAccountByPhoneForDebug(request.phone)
+                call.respond(ApiResponse<Unit>(message = "Account deleted"))
             }
         }
     }

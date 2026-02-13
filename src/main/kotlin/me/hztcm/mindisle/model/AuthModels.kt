@@ -57,6 +57,11 @@ data class LogoutRequest(
 )
 
 @Serializable
+data class DeleteAccountDebugRequest(
+    val phone: String
+)
+
+@Serializable
 data class TokenPairResponse(
     val accessToken: String,
     val refreshToken: String,
