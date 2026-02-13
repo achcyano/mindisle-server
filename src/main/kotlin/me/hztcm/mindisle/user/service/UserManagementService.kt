@@ -59,11 +59,20 @@ class UserManagementService(
 ) {
     private companion object {
         const val PROFILE_TEXT_MAX_LENGTH = 200
+        const val SMS_CODE_LENGTH = 6
+        const val TOKEN_MAX_LENGTH = 512
+        const val PASSWORD_MIN_LENGTH = 6
+        const val PASSWORD_MAX_LENGTH = 20
+        val SMS_CODE_REGEX = Regex("^\\d{6}$")
     }
 
     suspend fun sendSmsCode(request: SendSmsCodeRequest, requestIp: String?) {
         val phone = normalizePhone(request.phone)
         val now = LocalDateTime.now(ZoneOffset.UTC)
+        val smsTtlSeconds = when (request.purpose) {
+            SmsPurpose.REGISTER -> config.smsCodeTtlSeconds + config.registerSmsCodeGraceSeconds
+            SmsPurpose.RESET_PASSWORD -> config.smsCodeTtlSeconds
+        }
         DatabaseFactory.dbQuery {
             validateSmsBusinessRules(phone, request.purpose, now)
         }
@@ -75,7 +84,7 @@ class UserManagementService(
                     it[SmsVerificationCodesTable.phone] = phone
                     it[SmsVerificationCodesTable.purpose] = request.purpose
                     it[SmsVerificationCodesTable.codeHash] = sha256Hex(code)
-                    it[SmsVerificationCodesTable.expiresAt] = now.plusSeconds(config.smsCodeTtlSeconds)
+                    it[SmsVerificationCodesTable.expiresAt] = now.plusSeconds(smsTtlSeconds)
                     it[SmsVerificationCodesTable.createdAt] = now
                     it[SmsVerificationCodesTable.requestIp] = requestIp
                 }
@@ -89,7 +98,7 @@ class UserManagementService(
         val sendResult = smsGateway.sendSmsCode(
             phone = phone,
             purpose = request.purpose,
-            ttlSeconds = config.smsCodeTtlSeconds,
+            ttlSeconds = smsTtlSeconds,
             intervalSeconds = config.smsCooldownSeconds
         )
         DatabaseFactory.dbQuery {
@@ -97,7 +106,7 @@ class UserManagementService(
                 it[SmsVerificationCodesTable.phone] = phone
                 it[SmsVerificationCodesTable.purpose] = request.purpose
                 it[SmsVerificationCodesTable.codeHash] = sha256Hex(sendResult.outId ?: generateSecureToken(16))
-                it[SmsVerificationCodesTable.expiresAt] = now.plusSeconds(config.smsCodeTtlSeconds)
+                it[SmsVerificationCodesTable.expiresAt] = now.plusSeconds(smsTtlSeconds)
                 it[SmsVerificationCodesTable.consumedAt] = now
                 it[SmsVerificationCodesTable.createdAt] = now
                 it[SmsVerificationCodesTable.requestIp] = requestIp
@@ -113,6 +122,7 @@ class UserManagementService(
     suspend fun register(request: RegisterRequest, deviceId: String): AuthResponse {
         val phone = normalizePhone(request.phone)
         validatePassword(request.password)
+        validateSmsCode(request.smsCode)
         request.profile?.let { validateProfileUpdateRequest(it) }
         return DatabaseFactory.dbQuery {
             val now = LocalDateTime.now(ZoneOffset.UTC)
@@ -180,6 +190,7 @@ class UserManagementService(
 
     suspend fun loginDirect(request: DirectLoginRequest, deviceId: String): AuthResponse {
         val phone = normalizePhone(request.phone)
+        validateToken("ticket", request.ticket)
         return DatabaseFactory.dbQuery {
             val now = LocalDateTime.now(ZoneOffset.UTC)
             val user = UsersTable.selectAll().where { UsersTable.phone eq phone }.firstOrNull()
@@ -248,6 +259,7 @@ class UserManagementService(
     }
 
     suspend fun refreshToken(request: TokenRefreshRequest, deviceId: String): AuthResponse {
+        validateToken("refreshToken", request.refreshToken)
         return DatabaseFactory.dbQuery {
             val now = LocalDateTime.now(ZoneOffset.UTC)
             val tokenHash = sha256Hex(request.refreshToken)
@@ -289,6 +301,7 @@ class UserManagementService(
     suspend fun resetPassword(request: ResetPasswordRequest) {
         val phone = normalizePhone(request.phone)
         validatePassword(request.newPassword)
+        validateSmsCode(request.smsCode)
         DatabaseFactory.dbQuery {
             val now = LocalDateTime.now(ZoneOffset.UTC)
             val user = UsersTable.selectAll().where { UsersTable.phone eq phone }.firstOrNull()
@@ -320,6 +333,7 @@ class UserManagementService(
     }
 
     suspend fun logout(userId: Long, deviceId: String, refreshToken: String?) {
+        refreshToken?.let { validateToken("refreshToken", it) }
         DatabaseFactory.dbQuery {
             val now = LocalDateTime.now(ZoneOffset.UTC)
             val userEntityId = EntityID(userId, UsersTable)
@@ -396,10 +410,32 @@ class UserManagementService(
     }
 
     private fun validatePassword(password: String) {
-        if (password.length < 6) {
+        ensureNoControlChars("password", password)
+        if (password.length !in PASSWORD_MIN_LENGTH..PASSWORD_MAX_LENGTH) {
             throw AppException(
                 code = ErrorCodes.PASSWORD_TOO_SHORT,
-                message = "Password must be at least 6 characters",
+                message = "Password length must be between $PASSWORD_MIN_LENGTH and $PASSWORD_MAX_LENGTH characters",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+    }
+
+    private fun validateSmsCode(smsCode: String) {
+        if (!SMS_CODE_REGEX.matches(smsCode)) {
+            throw AppException(
+                code = ErrorCodes.INVALID_SMS_CODE,
+                message = "Invalid sms code format",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+    }
+
+    private fun validateToken(fieldName: String, value: String) {
+        ensureNoControlChars(fieldName, value)
+        if (value.length > TOKEN_MAX_LENGTH) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "$fieldName exceeds $TOKEN_MAX_LENGTH characters",
                 status = HttpStatusCode.BadRequest
             )
         }
@@ -553,11 +589,22 @@ class UserManagementService(
         if (value == null) {
             return
         }
+        ensureNoControlChars(fieldName, value)
         val charCount = value.codePointCount(0, value.length)
         if (charCount > PROFILE_TEXT_MAX_LENGTH) {
             throw AppException(
                 code = ErrorCodes.INVALID_REQUEST,
                 message = "$fieldName exceeds $PROFILE_TEXT_MAX_LENGTH characters",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+    }
+
+    private fun ensureNoControlChars(fieldName: String, value: String) {
+        if (value.any { it.isISOControl() }) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "$fieldName contains control characters",
                 status = HttpStatusCode.BadRequest
             )
         }
