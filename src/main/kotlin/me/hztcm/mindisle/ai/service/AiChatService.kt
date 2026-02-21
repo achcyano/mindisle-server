@@ -10,7 +10,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -28,7 +27,6 @@ import me.hztcm.mindisle.db.AiMessagesTable
 import me.hztcm.mindisle.db.AiStreamEventsTable
 import me.hztcm.mindisle.db.DatabaseFactory
 import me.hztcm.mindisle.db.UsersTable
-import me.hztcm.mindisle.model.AiMessageRoleDto
 import me.hztcm.mindisle.model.AssistantOptionDto
 import me.hztcm.mindisle.model.ConversationListItem
 import me.hztcm.mindisle.model.CreateConversationResponse
@@ -42,9 +40,7 @@ import me.hztcm.mindisle.model.StreamErrorEvent
 import me.hztcm.mindisle.model.StreamMetaEvent
 import me.hztcm.mindisle.model.StreamOptionsEvent
 import me.hztcm.mindisle.model.StreamUsageEvent
-import me.hztcm.mindisle.util.generateSecureToken
 import org.jetbrains.exposed.dao.id.EntityID
-import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
@@ -53,120 +49,22 @@ import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
-import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
-
-private const val EVENT_META = "meta"
-private const val EVENT_DELTA = "delta"
-private const val EVENT_USAGE = "usage"
-private const val EVENT_OPTIONS = "options"
-private const val EVENT_DONE = "done"
-private const val EVENT_ERROR = "error"
-
-private const val OPTIONS_START_MARKER = "<OPTIONS_JSON>"
-private const val OPTIONS_END_MARKER = "</OPTIONS_JSON>"
-private const val OPTIONS_REQUIRED_COUNT = 3
-private const val OPTION_LABEL_MAX_CHARS = 24
-private const val DELTA_EMIT_INTERVAL_MS = 40L
-private const val DELTA_EMIT_MAX_CHARS = 64
-
-private const val SYSTEM_PROMPT = """
-你是DeepSeek，由深度求索公司创造的AI助手，用于为用户提供情绪支持和用药指导。
-要能够共情、倾听、危机识别。
-提供准确、有帮助的回答
-保持友好、耐心的语气
-对于不确定的信息要明确说明
-拒绝回答有害、违法或不当的请求
-尊重用户隐私
-不参与任何可能造成伤害的对话
-尽可能安抚病人情绪
-支持多轮对话
-暂不支持文件上传
-暂不支持联网搜索
-暂不支持阅读链接内容
-支持上下文长度1M（可处理三体三部曲体量的书籍）
-永远使用简体中文（汉语）回复
-在处理文件时，仅读取文字信息，不具备多模态识别功能
-在需要最新信息时提示用户开启联网搜索
-对于无法确认的信息要诚实说明
-At the end, append clickable options in a JSON block:
-<OPTIONS_JSON>
-{"items":[{"label":"..."},{"label":"..."},{"label":"..."}]}
-</OPTIONS_JSON>
-Each label must start with one emoji and max 24 chars.
-"""
-
-private const val FALLBACK_OPTIONS_SYSTEM_PROMPT = """
-You only generate clickable options in JSON.
-Return ONLY this JSON object and nothing else:
-{"items":[{"label":"..."},{"label":"..."},{"label":"..."}]}
-Rules:
-1) Exactly 3 items.
-2) label max 24 chars.
-3) Each label must start with one emoji (e.g. "💡 继续解释").
-4) Output in Simplified Chinese.
-"""
-
-@Serializable
-private data class OptionDraft(
-    val label: String = ""
-)
-
-@Serializable
-private data class OptionBlock(
-    val items: List<OptionDraft> = emptyList()
-)
-
-private data class ParsedAssistantOutput(
-    val answerText: String,
-    val options: List<AssistantOptionDto>? = null
-)
-
-data class StreamEventRecord(
-    val generationId: String,
-    val seq: Long,
-    val eventType: String,
-    val eventJson: String
-) {
-    val eventId: String get() = "$generationId:$seq"
-
-    fun isTerminal(): Boolean = eventType == EVENT_DONE || eventType == EVENT_ERROR
-}
-
-data class ReplayEventsResult(
-    val generationId: String,
-    val events: List<StreamEventRecord>,
-    val terminalStatus: Boolean
-)
-
-data class GenerationOwnership(
-    val generationId: String,
-    val conversationId: Long,
-    val status: AiGenerationStatus
-)
-
-private data class GenerationContext(
-    val conversationId: Long,
-    val currentUserMessage: String,
-    val temperature: Double?,
-    val maxTokens: Int?,
-    val messages: List<ChatMessage>
-)
 
 class AiChatService(
     private val config: LlmConfig,
     private val deepSeekClient: DeepSeekAliyunClient
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val optionResolver = AiOptionResolver(deepSeekClient, json)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val generationJobs = ConcurrentHashMap<String, Job>()
     private val generationLock = Mutex()
     private val subscribers = ConcurrentHashMap<String, CopyOnWriteArraySet<Channel<StreamEventRecord>>>()
 
     suspend fun createConversation(userId: Long, title: String?): CreateConversationResponse {
-        validateTitle(title)
+        AiRequestValidators.validateTitle(title)
         val now = utcNow()
         return DatabaseFactory.dbQuery {
             val conversationId = AiConversationsTable.insert {
@@ -188,7 +86,7 @@ class AiChatService(
 
     suspend fun listConversations(userId: Long, limit: Int, cursor: String?): ListConversationsResponse {
         val safeLimit = limit.coerceIn(1, 50)
-        val cursorId = parseCursor(cursor, "cursor")
+        val cursorId = AiRequestValidators.parseCursor(cursor, "cursor")
 
         return DatabaseFactory.dbQuery {
             val condition = (AiConversationsTable.userId eq EntityID(userId, UsersTable)) and
@@ -215,7 +113,7 @@ class AiChatService(
 
     suspend fun listMessages(userId: Long, conversationId: Long, limit: Int, before: String?): ListMessagesResponse {
         val safeLimit = limit.coerceIn(1, 100)
-        val beforeId = parseCursor(before, "before")
+        val beforeId = AiRequestValidators.parseCursor(before, "before")
 
         DatabaseFactory.dbQuery {
             getOwnedConversation(userId, conversationId)
@@ -236,7 +134,7 @@ class AiChatService(
                     messageId = it[AiMessagesTable.id].value,
                     role = it[AiMessagesTable.role].toDto(),
                     content = it[AiMessagesTable.content],
-                    options = it[AiMessagesTable.optionsJson]?.let(::parseStoredOptionsJson),
+                    options = it[AiMessagesTable.optionsJson]?.let(optionResolver::parseStoredOptionsJson),
                     generationId = it[AiMessagesTable.generationId],
                     createdAt = it[AiMessagesTable.createdAt].toIsoInstant()
                 )
@@ -247,8 +145,9 @@ class AiChatService(
     }
 
     suspend fun startOrReuseGeneration(userId: Long, conversationId: Long, request: StreamChatRequest): String {
-        validateStreamChatRequest(request)
+        AiRequestValidators.validateStreamChatRequest(request, config)
         val now = utcNow()
+        val requestPayloadJson = json.encodeToString(request)
 
         val result = DatabaseFactory.dbQuery {
             getOwnedConversation(userId, conversationId)
@@ -273,7 +172,13 @@ class AiChatService(
                     )
                 }
                 val generationId = existing[AiMessagesTable.generationId]
-                    ?: createGenerationForMessage(userRef, conversationRef, existing[AiMessagesTable.id], request, now)
+                    ?: createGenerationForMessage(
+                        userRef = userRef,
+                        conversationRef = conversationRef,
+                        messageId = existing[AiMessagesTable.id],
+                        requestPayloadJson = requestPayloadJson,
+                        now = now
+                    )
                 generationId to false
             } else {
                 val userMessageId = AiMessagesTable.insert {
@@ -287,7 +192,13 @@ class AiChatService(
                     it[tokenCount] = null
                     it[createdAt] = now
                 }[AiMessagesTable.id]
-                val generationId = createGenerationForMessage(userRef, conversationRef, userMessageId, request, now)
+                val generationId = createGenerationForMessage(
+                    userRef = userRef,
+                    conversationRef = conversationRef,
+                    messageId = userMessageId,
+                    requestPayloadJson = requestPayloadJson,
+                    now = now
+                )
                 generationId to true
             }
         }
@@ -529,12 +440,13 @@ class AiChatService(
             }
             flushDelta(force = true)
 
-            val parsed = parseAssistantOutput(rawAssistant.toString())
-            val answerText = parsed.answerText.ifBlank { rawAssistant.toString().trim() }
-            val (options, source) = resolveOptions(
+            val rawAnswer = rawAssistant.toString()
+            val (answerCandidate, primaryOptions) = optionResolver.extractAnswerAndPrimaryOptions(rawAnswer)
+            val answerText = answerCandidate.ifBlank { rawAnswer.trim() }
+            val (options, source) = optionResolver.resolveOptions(
                 userMessage = context.currentUserMessage,
                 assistantAnswer = answerText,
-                primary = parsed.options
+                primary = primaryOptions
             )
 
             usage?.let {
@@ -601,159 +513,6 @@ class AiChatService(
         }
     }
 
-    private suspend fun resolveOptions(
-        userMessage: String,
-        assistantAnswer: String,
-        primary: List<AssistantOptionDto>?
-    ): Pair<List<AssistantOptionDto>, String> {
-        if (!primary.isNullOrEmpty()) {
-            return primary to "primary"
-        }
-        val fallback = runCatching {
-            generateOptionsWithFallback(userMessage, assistantAnswer)
-        }.getOrNull()
-        if (!fallback.isNullOrEmpty()) {
-            return fallback to "fallback"
-        }
-        return defaultOptions() to "default"
-    }
-
-    private suspend fun generateOptionsWithFallback(
-        userMessage: String,
-        assistantAnswer: String
-    ): List<AssistantOptionDto> {
-        val fallbackMessages = listOf(
-            ChatMessage(role = "system", content = FALLBACK_OPTIONS_SYSTEM_PROMPT),
-            ChatMessage(
-                role = "user",
-                content = buildString {
-                    appendLine("User message:")
-                    appendLine(userMessage.trim())
-                    appendLine()
-                    appendLine("Assistant answer:")
-                    appendLine(assistantAnswer.trim())
-                    appendLine()
-                    appendLine("Now return options JSON only.")
-                }
-            )
-        )
-        val (raw, _) = deepSeekClient.completeTextChat(
-            messages = fallbackMessages,
-            temperature = 0.2,
-            maxTokens = 256
-        )
-        val parsed = parseOptionsFromAnyText(raw)
-        return parsed ?: throw AppException(
-            code = ErrorCodes.AI_OPTIONS_FALLBACK_FAILED,
-            message = "Fallback options generation failed",
-            status = HttpStatusCode.BadGateway
-        )
-    }
-
-    private fun parseAssistantOutput(raw: String): ParsedAssistantOutput {
-        val trimmed = raw.trim()
-        val start = trimmed.indexOf(OPTIONS_START_MARKER)
-        val end = trimmed.indexOf(OPTIONS_END_MARKER)
-        if (start < 0 || end < 0 || end <= start) {
-            return ParsedAssistantOutput(answerText = trimmed)
-        }
-        val jsonBlock = trimmed.substring(start + OPTIONS_START_MARKER.length, end).trim()
-        val options = parseOptionsJson(jsonBlock)
-        val answer = (trimmed.substring(0, start) + trimmed.substring(end + OPTIONS_END_MARKER.length)).trim()
-        return ParsedAssistantOutput(
-            answerText = answer,
-            options = options
-        )
-    }
-
-    private fun parseOptionsFromAnyText(raw: String): List<AssistantOptionDto>? {
-        val trimmed = raw.trim()
-        if (trimmed.isBlank()) {
-            return null
-        }
-        val fromMarkers = parseAssistantOutput(trimmed).options
-        if (!fromMarkers.isNullOrEmpty()) {
-            return fromMarkers
-        }
-        parseOptionsJson(trimmed)?.let { return it }
-        val firstBrace = trimmed.indexOf("{")
-        val lastBrace = trimmed.lastIndexOf("}")
-        if (firstBrace >= 0 && lastBrace > firstBrace) {
-            return parseOptionsJson(trimmed.substring(firstBrace, lastBrace + 1))
-        }
-        return null
-    }
-
-    private fun parseOptionsJson(rawJson: String): List<AssistantOptionDto>? {
-        val parsed = runCatching {
-            json.decodeFromString<OptionBlock>(rawJson)
-        }.getOrNull() ?: return null
-        return normalizeOptions(parsed.items)
-    }
-
-    private fun normalizeOptions(items: List<OptionDraft>): List<AssistantOptionDto>? {
-        if (items.isEmpty()) {
-            return null
-        }
-        val distinct = linkedSetOf<String>()
-        val normalized = mutableListOf<OptionDraft>()
-        for (item in items) {
-            val label = item.label.trim()
-            if (label.isEmpty()) {
-                continue
-            }
-            if (label.any { it.isISOControl() }) {
-                continue
-            }
-            if (label.codePointCount(0, label.length) > OPTION_LABEL_MAX_CHARS) {
-                continue
-            }
-            if (!distinct.add(label)) {
-                continue
-            }
-            normalized += OptionDraft(label = label)
-            if (normalized.size == OPTIONS_REQUIRED_COUNT) {
-                break
-            }
-        }
-        if (normalized.size < OPTIONS_REQUIRED_COUNT) {
-            return null
-        }
-        return normalized.mapIndexed { index, option ->
-            AssistantOptionDto(
-                id = "opt_${index + 1}",
-                label = option.label
-            )
-        }
-    }
-
-    private fun defaultOptions(): List<AssistantOptionDto> {
-        return listOf(
-            AssistantOptionDto(
-                id = "opt_1",
-                label = "💡 请继续解释"
-            ),
-            AssistantOptionDto(
-                id = "opt_2",
-                label = "🧭 帮我做总结"
-            ),
-            AssistantOptionDto(
-                id = "opt_3",
-                label = "✅ 下一步怎么做"
-            )
-        )
-    }
-
-    private fun parseStoredOptionsJson(raw: String): List<AssistantOptionDto>? {
-        val parsed = runCatching {
-            json.decodeFromString<List<AssistantOptionDto>>(raw)
-        }.getOrNull() ?: return null
-        if (parsed.isEmpty()) {
-            return null
-        }
-        return parsed
-    }
-
     private suspend fun safeEmitErrorEvent(generationId: String, code: Int, message: String) {
         runCatching {
             appendAndPublishEvent(
@@ -788,7 +547,7 @@ class AiChatService(
             val summaryToUse = conversation[AiConversationsTable.summary]
 
             val messages = mutableListOf<ChatMessage>()
-            messages += ChatMessage(role = "system", content = SYSTEM_PROMPT)
+            messages += ChatMessage(role = "system", content = AI_SYSTEM_PROMPT)
             if (!summaryToUse.isNullOrBlank()) {
                 messages += ChatMessage(role = "system", content = "Conversation summary:\n$summaryToUse")
             }
@@ -909,142 +668,4 @@ class AiChatService(
         }
     }
 
-    private fun validateStreamChatRequest(request: StreamChatRequest) {
-        if (request.userMessage.isBlank()) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "userMessage is required",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-        if (request.userMessage.length > config.maxUserMessageChars) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "userMessage exceeds ${config.maxUserMessageChars} characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-        if (request.clientMessageId.isBlank()) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "clientMessageId is required",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-        if (request.clientMessageId.length > config.maxClientMessageIdChars) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "clientMessageId exceeds ${config.maxClientMessageIdChars} characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-        if (request.clientMessageId.any { it.isISOControl() } || request.userMessage.any { it.isISOControl() }) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "request contains control characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-        if (request.temperature != null && (request.temperature < 0.0 || request.temperature > 2.0)) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "temperature must be in [0, 2]",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-        if (request.maxTokens != null && (request.maxTokens <= 0 || request.maxTokens > 8192)) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "maxTokens must be in [1, 8192]",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-    }
-
-    private fun validateTitle(title: String?) {
-        val value = title ?: return
-        if (value.length > 100) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "title exceeds 100 characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-        if (value.any { it.isISOControl() }) {
-            throw AppException(
-                code = ErrorCodes.AI_INVALID_ARGUMENT,
-                message = "title contains control characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-    }
-
-    private fun parseCursor(raw: String?, name: String): Long? {
-        if (raw.isNullOrBlank()) {
-            return null
-        }
-        return raw.toLongOrNull() ?: throw AppException(
-            code = ErrorCodes.AI_INVALID_ARGUMENT,
-            message = "$name must be a valid long value",
-            status = HttpStatusCode.BadRequest
-        )
-    }
-
-    private fun org.jetbrains.exposed.sql.Transaction.createGenerationForMessage(
-        userRef: EntityID<Long>,
-        conversationRef: EntityID<Long>,
-        messageId: EntityID<Long>,
-        request: StreamChatRequest,
-        now: LocalDateTime
-    ): String {
-        val generationId = generateSecureToken(24)
-        AiGenerationsTable.insert {
-            it[AiGenerationsTable.generationId] = generationId
-            it[AiGenerationsTable.userId] = userRef
-            it[AiGenerationsTable.conversationId] = conversationRef
-            it[status] = AiGenerationStatus.RUNNING
-            it[requestPayloadJson] = json.encodeToString(request)
-            it[errorCode] = null
-            it[errorMessage] = null
-            it[startedAt] = now
-            it[completedAt] = null
-        }
-        AiMessagesTable.update({ AiMessagesTable.id eq messageId }) {
-            it[AiMessagesTable.generationId] = generationId
-        }
-        AiConversationsTable.update({ AiConversationsTable.id eq conversationRef }) {
-            it[updatedAt] = now
-            it[lastMessageAt] = now
-        }
-        return generationId
-    }
-
-    private fun org.jetbrains.exposed.sql.Transaction.getOwnedConversation(userId: Long, conversationId: Long): ResultRow {
-        val row = AiConversationsTable.selectAll().where {
-            AiConversationsTable.id eq EntityID(conversationId, AiConversationsTable)
-        }.firstOrNull()
-            ?: throw AppException(
-                code = ErrorCodes.AI_CONVERSATION_NOT_FOUND,
-                message = "Conversation not found",
-                status = HttpStatusCode.NotFound
-            )
-
-        if (row[AiConversationsTable.userId].value != userId) {
-            throw AppException(
-                code = ErrorCodes.AI_CONVERSATION_FORBIDDEN,
-                message = "Conversation does not belong to current user",
-                status = HttpStatusCode.Forbidden
-            )
-        }
-        return row
-    }
-
-    private fun AiMessageRole.toDto(): AiMessageRoleDto = when (this) {
-        AiMessageRole.SYSTEM -> AiMessageRoleDto.SYSTEM
-        AiMessageRole.USER -> AiMessageRoleDto.USER
-        AiMessageRole.ASSISTANT -> AiMessageRoleDto.ASSISTANT
-    }
-
-    private fun utcNow(): LocalDateTime = LocalDateTime.now(ZoneOffset.UTC)
-    private fun LocalDateTime.toIsoInstant(): String = atOffset(ZoneOffset.UTC).toInstant().toString()
 }
