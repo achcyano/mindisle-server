@@ -70,6 +70,8 @@ private const val OPTIONS_END_MARKER = "</OPTIONS_JSON>"
 private const val OPTIONS_REQUIRED_COUNT = 3
 private const val OPTION_LABEL_MAX_CHARS = 24
 private const val OPTION_PAYLOAD_MAX_CHARS = 80
+private const val DELTA_EMIT_INTERVAL_MS = 40L
+private const val DELTA_EMIT_MAX_CHARS = 64
 
 private const val SYSTEM_PROMPT = """
 You are a patient-care assistant. Respond in Simplified Chinese.
@@ -438,13 +440,46 @@ class AiChatService(
 
     private suspend fun runGeneration(generationId: String) {
         val rawAssistant = StringBuilder()
+        val pendingDelta = StringBuilder()
         var finishReason: String? = null
         var usage: UsageMetrics? = null
+        var lastDeltaEmitAt = 0L
 
         try {
             val context = buildGenerationContext(generationId)
-            appendAndPublishEvent(
-                generationId = generationId,
+            var nextSeq = loadLatestEventSeq(generationId) + 1L
+            suspend fun emitEvent(eventType: String, eventJson: String) {
+                appendAndPublishEvent(
+                    generationId = generationId,
+                    seq = nextSeq,
+                    eventType = eventType,
+                    eventJson = eventJson
+                )
+                nextSeq += 1L
+            }
+
+            suspend fun flushDelta(force: Boolean = false) {
+                if (pendingDelta.isEmpty()) {
+                    return
+                }
+                val now = System.currentTimeMillis()
+                if (!force) {
+                    val enoughTime = now - lastDeltaEmitAt >= DELTA_EMIT_INTERVAL_MS
+                    val enoughChars = pendingDelta.length >= DELTA_EMIT_MAX_CHARS
+                    if (!enoughTime && !enoughChars) {
+                        return
+                    }
+                }
+                val text = pendingDelta.toString()
+                pendingDelta.setLength(0)
+                lastDeltaEmitAt = now
+                emitEvent(
+                    eventType = EVENT_DELTA,
+                    eventJson = json.encodeToString(StreamDeltaEvent(text = text))
+                )
+            }
+
+            emitEvent(
                 eventType = EVENT_META,
                 eventJson = json.encodeToString(
                     StreamMetaEvent(
@@ -463,11 +498,8 @@ class AiChatService(
             ) { chunk ->
                 chunk.contentDelta?.takeIf { it.isNotEmpty() }?.let { delta ->
                     rawAssistant.append(delta)
-                    appendAndPublishEvent(
-                        generationId = generationId,
-                        eventType = EVENT_DELTA,
-                        eventJson = json.encodeToString(StreamDeltaEvent(text = delta))
-                    )
+                    pendingDelta.append(delta)
+                    flushDelta()
                 }
                 if (!chunk.finishReason.isNullOrBlank()) {
                     finishReason = chunk.finishReason
@@ -476,6 +508,7 @@ class AiChatService(
                     usage = chunk.usage
                 }
             }
+            flushDelta(force = true)
 
             val parsed = parseAssistantOutput(rawAssistant.toString())
             val answerText = parsed.answerText.ifBlank { rawAssistant.toString().trim() }
@@ -486,8 +519,7 @@ class AiChatService(
             )
 
             usage?.let {
-                appendAndPublishEvent(
-                    generationId = generationId,
+                emitEvent(
                     eventType = EVENT_USAGE,
                     eventJson = json.encodeToString(
                         StreamUsageEvent(
@@ -499,8 +531,7 @@ class AiChatService(
                 )
             }
 
-            appendAndPublishEvent(
-                generationId = generationId,
+            emitEvent(
                 eventType = EVENT_OPTIONS,
                 eventJson = json.encodeToString(
                     StreamOptionsEvent(
@@ -517,8 +548,7 @@ class AiChatService(
                 completionTokens = usage?.completionTokens
             )
 
-            appendAndPublishEvent(
-                generationId = generationId,
+            emitEvent(
                 eventType = EVENT_DONE,
                 eventJson = json.encodeToString(
                     StreamDoneEvent(
@@ -740,22 +770,11 @@ class AiChatService(
                 AiConversationsTable.id eq conversationRef
             }.first()
 
-            val allMessages = AiMessagesTable.selectAll().where {
+            val recentMessages = AiMessagesTable.selectAll().where {
                 AiMessagesTable.conversationId eq conversationRef
-            }.orderBy(AiMessagesTable.id, SortOrder.ASC).toList()
+            }.orderBy(AiMessagesTable.id, SortOrder.DESC).limit(config.contextRecentMessages).toList().asReversed()
 
-            val olderCount = (allMessages.size - config.contextRecentMessages).coerceAtLeast(0)
-            val olderMessages = if (olderCount > 0) allMessages.take(olderCount) else emptyList()
-            val recentMessages = if (olderCount > 0) allMessages.drop(olderCount) else allMessages
-
-            val existingSummary = conversation[AiConversationsTable.summary]
-            val summaryToUse = if (olderMessages.isNotEmpty()) generateSummary(olderMessages) else existingSummary
-            if (summaryToUse != existingSummary) {
-                AiConversationsTable.update({ AiConversationsTable.id eq conversationRef }) {
-                    it[summary] = summaryToUse
-                    it[updatedAt] = utcNow()
-                }
-            }
+            val summaryToUse = conversation[AiConversationsTable.summary]
 
             val messages = mutableListOf<ChatMessage>()
             messages += ChatMessage(role = "system", content = SYSTEM_PROMPT)
@@ -836,11 +855,17 @@ class AiChatService(
     }
 
     private suspend fun appendAndPublishEvent(generationId: String, eventType: String, eventJson: String): StreamEventRecord {
+        val seq = loadLatestEventSeq(generationId) + 1L
+        return appendAndPublishEvent(generationId, seq, eventType, eventJson)
+    }
+
+    private suspend fun appendAndPublishEvent(
+        generationId: String,
+        seq: Long,
+        eventType: String,
+        eventJson: String
+    ): StreamEventRecord {
         val event = DatabaseFactory.dbQuery {
-            val maxSeq = AiStreamEventsTable.selectAll().where {
-                AiStreamEventsTable.generationId eq generationId
-            }.orderBy(AiStreamEventsTable.seq, SortOrder.DESC).limit(1).firstOrNull()?.get(AiStreamEventsTable.seq) ?: 0L
-            val seq = maxSeq + 1L
             AiStreamEventsTable.insert {
                 it[AiStreamEventsTable.generationId] = generationId
                 it[AiStreamEventsTable.seq] = seq
@@ -852,6 +877,14 @@ class AiChatService(
         }
         publish(event)
         return event
+    }
+
+    private suspend fun loadLatestEventSeq(generationId: String): Long {
+        return DatabaseFactory.dbQuery {
+            AiStreamEventsTable.selectAll().where {
+                AiStreamEventsTable.generationId eq generationId
+            }.orderBy(AiStreamEventsTable.seq, SortOrder.DESC).limit(1).firstOrNull()?.get(AiStreamEventsTable.seq) ?: 0L
+        }
     }
 
     private fun publish(event: StreamEventRecord) {
@@ -944,15 +977,6 @@ class AiChatService(
             message = "$name must be a valid long value",
             status = HttpStatusCode.BadRequest
         )
-    }
-
-    private fun generateSummary(rows: List<ResultRow>): String {
-        val summary = rows.takeLast(40).joinToString("\n") { row ->
-            val role = row[AiMessagesTable.role].name.lowercase()
-            val content = row[AiMessagesTable.content].replace('\n', ' ').trim()
-            "$role: ${content.take(160)}"
-        }
-        return summary.take(2_000)
     }
 
     private fun org.jetbrains.exposed.sql.Transaction.createGenerationForMessage(

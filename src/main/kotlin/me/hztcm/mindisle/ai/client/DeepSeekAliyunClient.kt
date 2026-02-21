@@ -4,6 +4,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.accept
 import io.ktor.client.request.headers
 import io.ktor.client.request.preparePost
@@ -45,12 +47,21 @@ data class DeepSeekChunk(
 class DeepSeekAliyunClient(
     private val config: LlmConfig
 ) : Closeable {
+    private val upstreamSocketTimeoutMillis: Long? = config.requestTimeoutSeconds
+        .takeIf { it > 0L }
+        ?.let { it * 1_000L }
+
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
     }
 
     private val client = HttpClient(CIO) {
+        engine {
+            // For streaming responses, avoid engine-level total request timeout.
+            requestTimeout = 0L
+        }
+        install(HttpTimeout)
         install(ContentNegotiation) {
             json(json)
         }
@@ -78,6 +89,11 @@ class DeepSeekAliyunClient(
         )
         try {
             client.preparePost("${config.baseUrl.trimEnd('/')}/chat/completions") {
+                timeout {
+                    requestTimeoutMillis = null
+                    connectTimeoutMillis = CONNECT_TIMEOUT_MILLIS
+                    socketTimeoutMillis = upstreamSocketTimeoutMillis
+                }
                 accept(ContentType.Text.EventStream)
                 headers {
                     append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
@@ -135,9 +151,15 @@ class DeepSeekAliyunClient(
         } catch (e: AppException) {
             throw e
         } catch (e: Throwable) {
+            val timeoutHint = if (isTimeoutError(e)) {
+                val timeoutText = upstreamSocketTimeoutMillis?.toString() ?: "disabled"
+                " (upstream stream timeout=${timeoutText}ms; configure LLM_REQUEST_TIMEOUT_SECONDS)"
+            } else {
+                ""
+            }
             throw AppException(
                 code = ErrorCodes.AI_UPSTREAM_ERROR,
-                message = "Failed to stream DeepSeek response: ${e.message}",
+                message = "Failed to stream DeepSeek response: ${e.message}$timeoutHint",
                 status = HttpStatusCode.BadGateway
             )
         }
@@ -190,7 +212,24 @@ class DeepSeekAliyunClient(
     override fun close() {
         client.close()
     }
+
+    private fun isTimeoutError(error: Throwable): Boolean {
+        var cursor: Throwable? = error
+        while (cursor != null) {
+            if (cursor is java.net.SocketTimeoutException) {
+                return true
+            }
+            val name = cursor::class.qualifiedName.orEmpty()
+            if (name.contains("Timeout", ignoreCase = true)) {
+                return true
+            }
+            cursor = cursor.cause
+        }
+        return false
+    }
 }
+
+private const val CONNECT_TIMEOUT_MILLIS = 15_000L
 
 @Serializable
 private data class DeepSeekChatRequest(
