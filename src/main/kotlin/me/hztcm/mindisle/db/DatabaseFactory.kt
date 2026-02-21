@@ -36,7 +36,11 @@ object DatabaseFactory {
                 SmsVerificationCodesTable,
                 SmsVerificationAttemptsTable,
                 UserSessionsTable,
-                LoginTicketsTable
+                LoginTicketsTable,
+                AiConversationsTable,
+                AiMessagesTable,
+                AiGenerationsTable,
+                AiStreamEventsTable
             )
         }
     }

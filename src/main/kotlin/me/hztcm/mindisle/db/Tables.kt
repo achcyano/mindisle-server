@@ -13,6 +13,19 @@ enum class SessionStatus {
     REVOKED
 }
 
+enum class AiMessageRole {
+    SYSTEM,
+    USER,
+    ASSISTANT
+}
+
+enum class AiGenerationStatus {
+    RUNNING,
+    COMPLETED,
+    FAILED,
+    CANCELLED
+}
+
 object UsersTable : LongIdTable("users") {
     val phone = varchar("phone", 20).uniqueIndex()
     val passwordHash = varchar("password_hash", 255)
@@ -104,5 +117,67 @@ object LoginTicketsTable : LongIdTable("login_tickets") {
 
     init {
         index(false, userId, deviceId, expiresAt)
+    }
+}
+
+object AiConversationsTable : LongIdTable("ai_conversations") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val title = varchar("title", 100).nullable()
+    val summary = text("summary").nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+    val lastMessageAt = datetime("last_message_at")
+
+    init {
+        index(false, userId, lastMessageAt)
+    }
+}
+
+object AiMessagesTable : LongIdTable("ai_messages") {
+    val conversationId = reference("conversation_id", AiConversationsTable, onDelete = ReferenceOption.CASCADE)
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val role = enumerationByName("role", 16, AiMessageRole::class)
+    val content = text("content")
+    val clientMessageId = varchar("client_message_id", 128).nullable()
+    val generationId = varchar("generation_id", 64).nullable()
+    val tokenCount = integer("token_count").nullable()
+    val createdAt = datetime("created_at")
+
+    init {
+        uniqueIndex("uq_ai_user_conv_client_msg", userId, conversationId, clientMessageId)
+        index(false, conversationId, createdAt)
+        index(false, generationId)
+    }
+}
+
+object AiGenerationsTable : Table("ai_generations") {
+    val generationId = varchar("generation_id", 64)
+    val conversationId = reference("conversation_id", AiConversationsTable, onDelete = ReferenceOption.CASCADE)
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val status = enumerationByName("status", 16, AiGenerationStatus::class)
+    val requestPayloadJson = text("request_payload_json")
+    val errorCode = integer("error_code").nullable()
+    val errorMessage = varchar("error_message", 1000).nullable()
+    val startedAt = datetime("started_at")
+    val completedAt = datetime("completed_at").nullable()
+
+    override val primaryKey = PrimaryKey(generationId)
+
+    init {
+        index(false, userId, startedAt)
+        index(false, conversationId, startedAt)
+    }
+}
+
+object AiStreamEventsTable : LongIdTable("ai_stream_events") {
+    val generationId = varchar("generation_id", 64)
+    val seq = long("seq")
+    val eventType = varchar("event_type", 16)
+    val eventJson = text("event_json")
+    val createdAt = datetime("created_at")
+
+    init {
+        uniqueIndex(generationId, seq)
+        index(false, generationId, createdAt)
     }
 }

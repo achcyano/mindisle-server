@@ -41,6 +41,17 @@ data class SmsProviderConfig(
     val duplicatePolicy: Int
 )
 
+data class LlmConfig(
+    val apiKey: String?,
+    val baseUrl: String,
+    val model: String,
+    val contextRecentMessages: Int,
+    val replayTtlSeconds: Long,
+    val requestTimeoutSeconds: Long,
+    val maxUserMessageChars: Int,
+    val maxClientMessageIdChars: Int
+)
+
 object AppConfig {
     val db = DbConfig(
         jdbcUrl = dotenv["DB_URL"] ?: "jdbc:mysql://localhost:3306/mindisle?useSSL=false&serverTimezone=UTC&verifyServerCertificate=false&useUnicode=true&characterEncoding=utf8",
@@ -79,5 +90,16 @@ object AppConfig {
         codeLength = dotenv["ALIYUN_SMS_CODE_LENGTH"]?.toIntOrNull() ?: 6,
         caseAuthPolicy = dotenv["ALIYUN_SMS_CASE_AUTH_POLICY"]?.toIntOrNull() ?: 1,
         duplicatePolicy = dotenv["ALIYUN_SMS_DUPLICATE_POLICY"]?.toIntOrNull() ?: 1
+    )
+
+    val llm = LlmConfig(
+        apiKey = dotenv["LLM_API_KEY"],
+        baseUrl = dotenv["LLM_BASE_URL"] ?: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model = dotenv["LLM_MODEL"] ?: "deepseek-v3.2",
+        contextRecentMessages = dotenv["LLM_CONTEXT_RECENT_MESSAGES"]?.toIntOrNull() ?: 12,
+        replayTtlSeconds = dotenv["LLM_REPLAY_TTL_SECONDS"]?.toLongOrNull() ?: 600L,
+        requestTimeoutSeconds = dotenv["LLM_REQUEST_TIMEOUT_SECONDS"]?.toLongOrNull() ?: 120L,
+        maxUserMessageChars = dotenv["LLM_MAX_USER_MESSAGE_CHARS"]?.toIntOrNull() ?: 8_000,
+        maxClientMessageIdChars = dotenv["LLM_MAX_CLIENT_MESSAGE_ID_CHARS"]?.toIntOrNull() ?: 128
     )
 }

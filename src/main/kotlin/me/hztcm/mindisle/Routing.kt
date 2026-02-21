@@ -6,11 +6,16 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import me.hztcm.mindisle.ai.api.registerAiRoutes
+import me.hztcm.mindisle.ai.service.AiChatService
 import me.hztcm.mindisle.user.api.registerAuthRoutes
 import me.hztcm.mindisle.user.api.registerUserRoutes
 import me.hztcm.mindisle.user.service.UserManagementService
 
-fun Application.configureRouting(userService: UserManagementService) {
+fun Application.configureRouting(
+    userService: UserManagementService,
+    aiChatService: AiChatService
+) {
     routing {
         get("/") {
             call.respondText("MindIsle server is running.")
@@ -23,6 +28,7 @@ fun Application.configureRouting(userService: UserManagementService) {
         route("/api/v1") {
             registerAuthRoutes(userService)
             registerUserRoutes(userService)
+            registerAiRoutes(aiChatService)
         }
     }
 }

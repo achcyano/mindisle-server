@@ -3,9 +3,12 @@ package me.hztcm.mindisle
 import io.github.cdimascio.dotenv.dotenv
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.*
+import io.ktor.server.application.ApplicationStopping
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import me.hztcm.mindisle.ai.client.DeepSeekAliyunClient
+import me.hztcm.mindisle.ai.service.AiChatService
 import me.hztcm.mindisle.common.configureStatusPages
 import me.hztcm.mindisle.config.AppConfig
 import me.hztcm.mindisle.db.DatabaseFactory
@@ -41,8 +44,15 @@ fun Application.module() {
     val jwtService = JwtService(AppConfig.auth)
     val smsGateway = createSmsGateway(AppConfig.sms)
     val userService = UserManagementService(AppConfig.auth, jwtService, smsGateway)
+    val deepSeekClient = DeepSeekAliyunClient(AppConfig.llm)
+    val aiChatService = AiChatService(AppConfig.llm, deepSeekClient)
 
     configureStatusPages()
     configureAuth(jwtService)
-    configureRouting(userService)
+    configureRouting(userService, aiChatService)
+
+    monitor.subscribe(ApplicationStopping) {
+        runCatching { aiChatService.close() }
+        runCatching { deepSeekClient.close() }
+    }
 }
