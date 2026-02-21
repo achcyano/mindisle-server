@@ -73,15 +73,7 @@ private const val OPTION_PAYLOAD_MAX_CHARS = 80
 
 private const val SYSTEM_PROMPT = """
 You are a patient-care assistant. Respond in Simplified Chinese.
-After your normal answer, you MUST append one options block with this exact format:
-<OPTIONS_JSON>
-{"items":[{"label":"...","payload":"..."},{"label":"...","payload":"..."},{"label":"...","payload":"..."}]}
-</OPTIONS_JSON>
-Rules:
-1) Exactly 3 items.
-2) label should be short and clickable.
-3) payload should be a complete user follow-up sentence.
-4) Do not output anything after </OPTIONS_JSON>.
+Keep the answer concise and practical.
 """
 
 private const val FALLBACK_OPTIONS_SYSTEM_PROMPT = """
@@ -471,6 +463,11 @@ class AiChatService(
             ) { chunk ->
                 chunk.contentDelta?.takeIf { it.isNotEmpty() }?.let { delta ->
                     rawAssistant.append(delta)
+                    appendAndPublishEvent(
+                        generationId = generationId,
+                        eventType = EVENT_DELTA,
+                        eventJson = json.encodeToString(StreamDeltaEvent(text = delta))
+                    )
                 }
                 if (!chunk.finishReason.isNullOrBlank()) {
                     finishReason = chunk.finishReason
@@ -487,14 +484,6 @@ class AiChatService(
                 assistantAnswer = answerText,
                 primary = parsed.options
             )
-
-            if (answerText.isNotBlank()) {
-                appendAndPublishEvent(
-                    generationId = generationId,
-                    eventType = EVENT_DELTA,
-                    eventJson = json.encodeToString(StreamDeltaEvent(text = answerText))
-                )
-            }
 
             usage?.let {
                 appendAndPublishEvent(

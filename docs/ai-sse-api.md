@@ -65,7 +65,7 @@ data: <json>
 
 标准顺序：
 1. `meta`
-2. `delta`（当前实现通常为合并后的一段文本）
+2. `delta`（流式增量，按上游 chunk 实时下发，可能是词片段）
 3. `usage`（可选）
 4. `options`（必有）
 5. `done`
