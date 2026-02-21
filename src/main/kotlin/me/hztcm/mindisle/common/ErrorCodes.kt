@@ -22,6 +22,7 @@ object ErrorCodes {
     const val SMS_PROVIDER_ERROR = 50010
 
     const val AI_INVALID_ARGUMENT = 40010
+    const val AI_OPTIONS_INVALID = 40011
     const val AI_CONVERSATION_FORBIDDEN = 40310
     const val AI_CONVERSATION_NOT_FOUND = 40410
     const val AI_GENERATION_NOT_FOUND = 40411
@@ -29,5 +30,7 @@ object ErrorCodes {
     const val AI_REPLAY_WINDOW_EXPIRED = 40911
     const val AI_RATE_LIMITED = 42910
     const val AI_UPSTREAM_ERROR = 50201
+    const val AI_OPTIONS_FALLBACK_FAILED = 50202
     const val AI_STREAM_INTERNAL_ERROR = 50020
+    const val AI_OPTIONS_PARSE_FAILED = 50021
 }

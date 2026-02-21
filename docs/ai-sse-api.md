@@ -1,138 +1,58 @@
 # MindIsle AI SSE 接口说明（DeepSeek v3.2 / 阿里云）
 
-本文档描述新增的 AI 对话接口，供客户端接入使用。接口基于现有 JWT 鉴权体系，支持：
+本文档说明 AI 对话接口（`/api/v1/ai/**`）的请求方式、SSE 事件、断线重连，以及“可点击选项（options）”机制。
 
-- 按用户隔离会话
-- 服务端持久化全量历史消息
-- SSE 流式输出
-- 基于 `Last-Event-ID` 的断线重连回放
+## 1. 总览
 
-## 1. 基础约定
-
-- API 前缀：`/api/v1/ai`
 - 鉴权：所有接口都需要 `Authorization: Bearer <accessToken>`
-- 响应包装（非 SSE）：
+- 协议：普通接口返回 `ApiResponse`，流式接口返回 `text/event-stream`
+- 历史：按用户保存全部会话和消息
+- 选项：每次助手回复都会返回 3 个可点击选项
+- 点击语义：客户端点击后，将 `option.payload` 直接作为下一轮 `userMessage` 发给服务端
 
+## 2. 主要接口
+
+### 2.1 创建会话
+- `POST /api/v1/ai/conversations`
+- body:
 ```json
-{
-  "code": 0,
-  "message": "OK",
-  "data": {}
-}
+{ "title": "可选标题" }
 ```
 
-## 2. 数据结构
+### 2.2 会话列表
+- `GET /api/v1/ai/conversations?limit=20&cursor=<optional>`
 
-### 2.1 创建会话请求
+### 2.3 历史消息
+- `GET /api/v1/ai/conversations/{conversationId}/messages?limit=50&before=<optional>`
+- assistant 消息会带 `options` 字段（见第 4 节）
 
+### 2.4 发起流式对话
+- `POST /api/v1/ai/conversations/{conversationId}/stream`
+- headers:
+  - `Authorization`
+  - `Content-Type: application/json`
+  - `Accept: text/event-stream`
+  - `Last-Event-ID`（可选）
+- body:
 ```json
 {
-  "title": "可选，<=100字符"
-}
-```
-
-### 2.2 创建会话响应 `CreateConversationResponse`
-
-```json
-{
-  "conversationId": 1,
-  "title": "慢病咨询",
-  "createdAt": "2026-02-21T06:10:00Z"
-}
-```
-
-### 2.3 发起流式对话请求 `StreamChatRequest`
-
-```json
-{
-  "userMessage": "最近睡眠不太好怎么办？",
-  "clientMessageId": "2c47f6f4-9a58-4a9e-8e53-3fe8a9f42ed6",
+  "userMessage": "最近睡眠不好怎么办？",
+  "clientMessageId": "uuid",
   "temperature": 0.7,
   "maxTokens": 2048
 }
 ```
 
-- `clientMessageId` 为客户端幂等键，建议 UUID。
-- 重试同一条用户消息时必须复用同一个 `clientMessageId`。
-
-## 3. HTTP 接口
-
-### 3.1 创建会话
-
-- `POST /api/v1/ai/conversations`
-- Headers：
-  - `Authorization: Bearer <accessToken>`
-  - `Content-Type: application/json`
-- Body：`CreateConversationRequest`
-- 成功：`201`
-- 响应：`ApiResponse<CreateConversationResponse>`
-
-### 3.2 会话列表
-
-- `GET /api/v1/ai/conversations?limit=20&cursor=<optional>`
-- Headers：
-  - `Authorization: Bearer <accessToken>`
-- Query：
-  - `limit`：可选，范围 1~50，默认 20
-  - `cursor`：可选，上一页返回的 `nextCursor`
-- 成功：`200`
-- 响应：
-
-```json
-{
-  "code": 0,
-  "message": "OK",
-  "data": {
-    "items": [
-      {
-        "conversationId": 12,
-        "title": "慢病咨询",
-        "summary": "历史摘要...",
-        "lastMessageAt": "2026-02-21T06:30:00Z",
-        "createdAt": "2026-02-20T10:00:00Z"
-      }
-    ],
-    "nextCursor": "11"
-  }
-}
-```
-
-### 3.3 历史消息
-
-- `GET /api/v1/ai/conversations/{conversationId}/messages?limit=50&before=<optional>`
-- Headers：
-  - `Authorization: Bearer <accessToken>`
-- Query：
-  - `limit`：可选，范围 1~100，默认 50
-  - `before`：可选，分页游标（消息 ID）
-- 成功：`200`
-- 响应：`ApiResponse<ListMessagesResponse>`
-
-### 3.4 发起/重试流式生成（SSE）
-
-- `POST /api/v1/ai/conversations/{conversationId}/stream`
-- Headers：
-  - `Authorization: Bearer <accessToken>`
-  - `Content-Type: application/json`
-  - `Accept: text/event-stream`
-  - `Last-Event-ID`：可选（同一 generation 断线恢复时使用）
-- Body：`StreamChatRequest`
-- 成功：`200` + SSE 流
-
-### 3.5 按 generation 重连（SSE）
-
+### 2.5 按 generation 重连
 - `GET /api/v1/ai/generations/{generationId}/stream`
-- Headers：
-  - `Authorization: Bearer <accessToken>`
+- headers:
+  - `Authorization`
   - `Accept: text/event-stream`
-  - `Last-Event-ID`：可选，格式 `generationId:seq`
-- 成功：`200` + SSE 流
+  - `Last-Event-ID`（可选，格式 `<generationId>:<seq>`）
 
-## 4. SSE 协议
+## 3. SSE 事件
 
-### 4.1 事件通用格式
-
-服务端按如下格式推送：
+服务端统一输出：
 
 ```text
 id: <generationId>:<seq>
@@ -141,106 +61,90 @@ data: <json>
 
 ```
 
-其中：
+### 3.1 事件类型与顺序
 
-- `id` 用于断线重连
-- `event` 为事件名
-- `data` 为 JSON 文本
-
-### 4.2 事件类型
-
+标准顺序：
 1. `meta`
-
-```json
-{
-  "generationId": "abc123",
-  "conversationId": 12,
-  "model": "deepseek-v3.2",
-  "createdAt": "2026-02-21T06:30:00Z"
-}
-```
-
-2. `delta`
-
-```json
-{ "text": "本次新增文本片段" }
-```
-
+2. `delta`（当前实现通常为合并后的一段文本）
 3. `usage`（可选）
+4. `options`（必有）
+5. `done`
+
+异常时会发送：
+- `error`
+
+### 3.2 `options` 事件
 
 ```json
 {
-  "promptTokens": 120,
-  "completionTokens": 300,
-  "totalTokens": 420
+  "items": [
+    { "id": "opt_1", "label": "请继续解释", "payload": "请继续解释，并给我更具体一点的建议。" },
+    { "id": "opt_2", "label": "帮我做总结", "payload": "请把刚才的回答总结成三点重点。" },
+    { "id": "opt_3", "label": "下一步怎么做", "payload": "结合我现在的情况，我下一步具体该怎么做？" }
+  ],
+  "source": "primary"
 }
 ```
 
-4. `done`
+`source` 取值：
+- `primary`：主模型回复中成功解析出选项
+- `fallback`：主解析失败，单独调用一次 LLM 生成选项
+- `default`：主解析 + fallback 都失败，服务端固定兜底选项
+
+## 4. 历史消息结构
+
+`GET /messages` 返回的 assistant 消息示例：
 
 ```json
 {
-  "assistantMessageId": 987,
-  "finishReason": "stop"
+  "messageId": 1001,
+  "role": "ASSISTANT",
+  "content": "这是助手回答正文",
+  "options": [
+    { "id": "opt_1", "label": "请继续解释", "payload": "请继续解释，并给我更具体一点的建议。" },
+    { "id": "opt_2", "label": "帮我做总结", "payload": "请把刚才的回答总结成三点重点。" },
+    { "id": "opt_3", "label": "下一步怎么做", "payload": "结合我现在的情况，我下一步具体该怎么做？" }
+  ],
+  "generationId": "xxx",
+  "createdAt": "2026-02-21T12:00:00Z"
 }
 ```
 
-5. `error`
+## 5. 断线重连
 
-```json
-{
-  "code": 50201,
-  "message": "Upstream request failed"
-}
-```
+1. 客户端记录最近一个 SSE `id`
+2. 断线后调用重连接口并携带 `Last-Event-ID`
+3. 服务端会回放缺失事件（包括 `options`）
+4. 如果超出回放窗口，返回 `40911 AI_REPLAY_WINDOW_EXPIRED`
 
-说明：
+## 6. options 约束
 
-- `reasoning_content` 不向客户端透出。
-- 当收到 `done` 或 `error` 后，本次流结束。
+- 固定 3 个
+- `label` 最长 24 字符
+- `payload` 最长 80 字符
+- 不能包含控制字符
+- 同一批 options 内 `payload` 不能重复
 
-## 5. 断线重连流程
-
-1. 首次调用 `POST /conversations/{conversationId}/stream`。
-2. 从 `meta` 事件中拿到 `generationId`。
-3. 客户端持续记录最后一个 SSE `id`（如 `abc123:17`）。
-4. 断线后调用 `GET /generations/{generationId}/stream`，并携带 `Last-Event-ID: abc123:17`。
-5. 服务端先回放 `seq > 17` 的事件，再继续实时推送（若任务仍在运行）。
-6. 回放窗口默认 10 分钟，超时返回 `40911`，客户端需重发问题创建新 generation。
-
-## 6. 幂等与历史策略
-
-- 服务端保存每个用户的完整会话消息历史（`USER/ASSISTANT`）。
-- 调用模型时使用：
-  - 固定 System 提示词（仅服务端代码硬编码）
-  - 会话摘要
-  - 最近 N 条消息（默认 12 条）
-- 同一会话下：
-  - 相同 `clientMessageId` + 相同 `userMessage`：视为幂等重试，复用已有 generation。
-  - 相同 `clientMessageId` + 不同 `userMessage`：返回 `40910`。
-
-## 7. 新增错误码
+## 7. 错误码（新增/相关）
 
 | code | HTTP | 含义 |
 |---|---|---|
-| 40010 | 400 | `AI_INVALID_ARGUMENT`，参数非法（空消息、超长、非法游标、非法 Last-Event-ID 等） |
-| 40310 | 403 | `AI_CONVERSATION_FORBIDDEN`，会话/生成任务不属于当前用户 |
-| 40410 | 404 | `AI_CONVERSATION_NOT_FOUND` |
-| 40411 | 404 | `AI_GENERATION_NOT_FOUND` |
-| 40910 | 409 | `AI_IDEMPOTENCY_CONFLICT`，同 `clientMessageId` 内容冲突 |
-| 40911 | 409 | `AI_REPLAY_WINDOW_EXPIRED`，重连回放窗口超时或回放缺口 |
-| 42910 | 429 | `AI_RATE_LIMITED`，上游限流 |
-| 50020 | 500 | `AI_STREAM_INTERNAL_ERROR`，服务端流处理异常 |
-| 50201 | 502 | `AI_UPSTREAM_ERROR`，阿里云/模型上游异常 |
+| 40010 | 400 | AI 请求参数非法 |
+| 40011 | 400 | 选项结构非法 |
+| 40310 | 403 | 会话/生成任务不属于当前用户 |
+| 40410 | 404 | 会话不存在 |
+| 40411 | 404 | generation 不存在 |
+| 40910 | 409 | 幂等冲突（同 clientMessageId 不同内容） |
+| 40911 | 409 | 重连回放窗口过期/缺口 |
+| 42910 | 429 | 上游限流 |
+| 50020 | 500 | 服务端流处理异常 |
+| 50021 | 500 | 主回复选项解析失败（内部兜底流程会继续） |
+| 50201 | 502 | 上游调用失败 |
+| 50202 | 502 | fallback 选项生成失败（内部会再用默认选项） |
 
-同时仍可能返回已有通用错误码：
+## 8. 客户端接入建议
 
-- `40100`：未登录/Token 无效
-- `50000`：未捕获内部错误
-
-## 8. 客户端建议
-
-1. 每条用户消息都生成唯一 `clientMessageId`（UUID）。
-2. 接收 SSE 时，实时缓存最后 `id`。
-3. 断线后优先走 `GET /generations/{generationId}/stream + Last-Event-ID` 重连。
-4. 收到 `40911` 后，提示用户网络中断过久并允许“重新发送”。
+1. 每次发消息都生成唯一 `clientMessageId`
+2. 始终监听 `options` 事件并渲染按钮
+3. 点击按钮时直接发送 `payload` 作为下一轮 `userMessage`
+4. 会话重进时从历史消息 `options` 字段恢复按钮

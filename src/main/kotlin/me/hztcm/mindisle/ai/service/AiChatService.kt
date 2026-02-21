@@ -10,6 +10,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -28,6 +29,7 @@ import me.hztcm.mindisle.db.AiStreamEventsTable
 import me.hztcm.mindisle.db.DatabaseFactory
 import me.hztcm.mindisle.db.UsersTable
 import me.hztcm.mindisle.model.AiMessageRoleDto
+import me.hztcm.mindisle.model.AssistantOptionDto
 import me.hztcm.mindisle.model.ConversationListItem
 import me.hztcm.mindisle.model.CreateConversationResponse
 import me.hztcm.mindisle.model.ListConversationsResponse
@@ -38,6 +40,7 @@ import me.hztcm.mindisle.model.StreamDeltaEvent
 import me.hztcm.mindisle.model.StreamDoneEvent
 import me.hztcm.mindisle.model.StreamErrorEvent
 import me.hztcm.mindisle.model.StreamMetaEvent
+import me.hztcm.mindisle.model.StreamOptionsEvent
 import me.hztcm.mindisle.model.StreamUsageEvent
 import me.hztcm.mindisle.util.generateSecureToken
 import org.jetbrains.exposed.dao.id.EntityID
@@ -58,27 +61,55 @@ import java.util.concurrent.CopyOnWriteArraySet
 private const val EVENT_META = "meta"
 private const val EVENT_DELTA = "delta"
 private const val EVENT_USAGE = "usage"
+private const val EVENT_OPTIONS = "options"
 private const val EVENT_DONE = "done"
 private const val EVENT_ERROR = "error"
+
+private const val OPTIONS_START_MARKER = "<OPTIONS_JSON>"
+private const val OPTIONS_END_MARKER = "</OPTIONS_JSON>"
+private const val OPTIONS_REQUIRED_COUNT = 3
+private const val OPTION_LABEL_MAX_CHARS = 24
+private const val OPTION_PAYLOAD_MAX_CHARS = 80
+
 private const val SYSTEM_PROMPT = """
-你是DeepSeek，由深度求索公司创造的AI助手，用于安抚病人情绪、为病人在量表填写和用药等方面提供帮助。
-知识截止日期：2025年5月
-提供准确、有帮助的回答
-保持友好、耐心的语气
-对于不确定的信息要明确说明
-拒绝回答有害、违法或不当的请求
-尊重用户隐私
-不参与任何可能造成伤害的对话
-当用户情绪激动时，提供安抚和支持
-若用户询问医疗建议，提供一般信息并建议咨询专业医生
-支持多轮对话
-暂时不支持文件上传（图像、txt、pdf、ppt、word、excel）并从中读取文字信息
-暂时不支持联网搜索
-支持阅读链接内容
-支持上下文长度128k
-使用汉语（简体中文）回复
-对于无法确认的信息要诚实说明
+You are a patient-care assistant. Respond in Simplified Chinese.
+After your normal answer, you MUST append one options block with this exact format:
+<OPTIONS_JSON>
+{"items":[{"label":"...","payload":"..."},{"label":"...","payload":"..."},{"label":"...","payload":"..."}]}
+</OPTIONS_JSON>
+Rules:
+1) Exactly 3 items.
+2) label should be short and clickable.
+3) payload should be a complete user follow-up sentence.
+4) Do not output anything after </OPTIONS_JSON>.
 """
+
+private const val FALLBACK_OPTIONS_SYSTEM_PROMPT = """
+You only generate clickable options in JSON.
+Return ONLY this JSON object and nothing else:
+{"items":[{"label":"...","payload":"..."},{"label":"...","payload":"..."},{"label":"...","payload":"..."}]}
+Rules:
+1) Exactly 3 items.
+2) label max 24 chars.
+3) payload max 80 chars.
+4) Output in Simplified Chinese.
+"""
+
+@Serializable
+private data class OptionDraft(
+    val label: String = "",
+    val payload: String = ""
+)
+
+@Serializable
+private data class OptionBlock(
+    val items: List<OptionDraft> = emptyList()
+)
+
+private data class ParsedAssistantOutput(
+    val answerText: String,
+    val options: List<AssistantOptionDto>? = null
+)
 
 data class StreamEventRecord(
     val generationId: String,
@@ -105,6 +136,7 @@ data class GenerationOwnership(
 
 private data class GenerationContext(
     val conversationId: Long,
+    val currentUserMessage: String,
     val temperature: Double?,
     val maxTokens: Int?,
     val messages: List<ChatMessage>
@@ -191,6 +223,7 @@ class AiChatService(
                     messageId = it[AiMessagesTable.id].value,
                     role = it[AiMessagesTable.role].toDto(),
                     content = it[AiMessagesTable.content],
+                    options = it[AiMessagesTable.optionsJson]?.let(::parseStoredOptionsJson),
                     generationId = it[AiMessagesTable.generationId],
                     createdAt = it[AiMessagesTable.createdAt].toIsoInstant()
                 )
@@ -235,6 +268,7 @@ class AiChatService(
                     it[AiMessagesTable.conversationId] = conversationRef
                     it[role] = AiMessageRole.USER
                     it[content] = userMessage
+                    it[optionsJson] = null
                     it[AiMessagesTable.clientMessageId] = clientMessageId
                     it[generationId] = null
                     it[tokenCount] = null
@@ -411,7 +445,7 @@ class AiChatService(
     }
 
     private suspend fun runGeneration(generationId: String) {
-        val assistantText = StringBuilder()
+        val rawAssistant = StringBuilder()
         var finishReason: String? = null
         var usage: UsageMetrics? = null
 
@@ -436,12 +470,7 @@ class AiChatService(
                 maxTokens = context.maxTokens
             ) { chunk ->
                 chunk.contentDelta?.takeIf { it.isNotEmpty() }?.let { delta ->
-                    assistantText.append(delta)
-                    appendAndPublishEvent(
-                        generationId = generationId,
-                        eventType = EVENT_DELTA,
-                        eventJson = json.encodeToString(StreamDeltaEvent(text = delta))
-                    )
+                    rawAssistant.append(delta)
                 }
                 if (!chunk.finishReason.isNullOrBlank()) {
                     finishReason = chunk.finishReason
@@ -449,6 +478,22 @@ class AiChatService(
                 if (chunk.usage != null) {
                     usage = chunk.usage
                 }
+            }
+
+            val parsed = parseAssistantOutput(rawAssistant.toString())
+            val answerText = parsed.answerText.ifBlank { rawAssistant.toString().trim() }
+            val (options, source) = resolveOptions(
+                userMessage = context.currentUserMessage,
+                assistantAnswer = answerText,
+                primary = parsed.options
+            )
+
+            if (answerText.isNotBlank()) {
+                appendAndPublishEvent(
+                    generationId = generationId,
+                    eventType = EVENT_DELTA,
+                    eventJson = json.encodeToString(StreamDeltaEvent(text = answerText))
+                )
             }
 
             usage?.let {
@@ -465,9 +510,21 @@ class AiChatService(
                 )
             }
 
+            appendAndPublishEvent(
+                generationId = generationId,
+                eventType = EVENT_OPTIONS,
+                eventJson = json.encodeToString(
+                    StreamOptionsEvent(
+                        items = options,
+                        source = source
+                    )
+                )
+            )
+
             val assistantMessageId = persistAssistantMessage(
                 generationId = generationId,
-                content = assistantText.toString(),
+                content = answerText,
+                options = options,
                 completionTokens = usage?.completionTokens
             )
 
@@ -477,7 +534,8 @@ class AiChatService(
                 eventJson = json.encodeToString(
                     StreamDoneEvent(
                         assistantMessageId = assistantMessageId,
-                        finishReason = finishReason ?: "stop"
+                        finishReason = finishReason ?: "stop",
+                        hasOptions = true
                     )
                 )
             )
@@ -505,6 +563,167 @@ class AiChatService(
         }
     }
 
+    private suspend fun resolveOptions(
+        userMessage: String,
+        assistantAnswer: String,
+        primary: List<AssistantOptionDto>?
+    ): Pair<List<AssistantOptionDto>, String> {
+        if (!primary.isNullOrEmpty()) {
+            return primary to "primary"
+        }
+        val fallback = runCatching {
+            generateOptionsWithFallback(userMessage, assistantAnswer)
+        }.getOrNull()
+        if (!fallback.isNullOrEmpty()) {
+            return fallback to "fallback"
+        }
+        return defaultOptions() to "default"
+    }
+
+    private suspend fun generateOptionsWithFallback(
+        userMessage: String,
+        assistantAnswer: String
+    ): List<AssistantOptionDto> {
+        val fallbackMessages = listOf(
+            ChatMessage(role = "system", content = FALLBACK_OPTIONS_SYSTEM_PROMPT),
+            ChatMessage(
+                role = "user",
+                content = buildString {
+                    appendLine("User message:")
+                    appendLine(userMessage.trim())
+                    appendLine()
+                    appendLine("Assistant answer:")
+                    appendLine(assistantAnswer.trim())
+                    appendLine()
+                    appendLine("Now return options JSON only.")
+                }
+            )
+        )
+        val (raw, _) = deepSeekClient.completeTextChat(
+            messages = fallbackMessages,
+            temperature = 0.2,
+            maxTokens = 256
+        )
+        val parsed = parseOptionsFromAnyText(raw)
+        return parsed ?: throw AppException(
+            code = ErrorCodes.AI_OPTIONS_FALLBACK_FAILED,
+            message = "Fallback options generation failed",
+            status = HttpStatusCode.BadGateway
+        )
+    }
+
+    private fun parseAssistantOutput(raw: String): ParsedAssistantOutput {
+        val trimmed = raw.trim()
+        val start = trimmed.indexOf(OPTIONS_START_MARKER)
+        val end = trimmed.indexOf(OPTIONS_END_MARKER)
+        if (start < 0 || end < 0 || end <= start) {
+            return ParsedAssistantOutput(answerText = trimmed)
+        }
+        val jsonBlock = trimmed.substring(start + OPTIONS_START_MARKER.length, end).trim()
+        val options = parseOptionsJson(jsonBlock)
+        val answer = (trimmed.substring(0, start) + trimmed.substring(end + OPTIONS_END_MARKER.length)).trim()
+        return ParsedAssistantOutput(
+            answerText = answer,
+            options = options
+        )
+    }
+
+    private fun parseOptionsFromAnyText(raw: String): List<AssistantOptionDto>? {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) {
+            return null
+        }
+        val fromMarkers = parseAssistantOutput(trimmed).options
+        if (!fromMarkers.isNullOrEmpty()) {
+            return fromMarkers
+        }
+        parseOptionsJson(trimmed)?.let { return it }
+        val firstBrace = trimmed.indexOf("{")
+        val lastBrace = trimmed.lastIndexOf("}")
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            return parseOptionsJson(trimmed.substring(firstBrace, lastBrace + 1))
+        }
+        return null
+    }
+
+    private fun parseOptionsJson(rawJson: String): List<AssistantOptionDto>? {
+        val parsed = runCatching {
+            json.decodeFromString<OptionBlock>(rawJson)
+        }.getOrNull() ?: return null
+        return normalizeOptions(parsed.items)
+    }
+
+    private fun normalizeOptions(items: List<OptionDraft>): List<AssistantOptionDto>? {
+        if (items.isEmpty()) {
+            return null
+        }
+        val distinct = linkedSetOf<String>()
+        val normalized = mutableListOf<OptionDraft>()
+        for (item in items) {
+            val label = item.label.trim()
+            val payload = item.payload.trim()
+            if (label.isEmpty() || payload.isEmpty()) {
+                continue
+            }
+            if (label.any { it.isISOControl() } || payload.any { it.isISOControl() }) {
+                continue
+            }
+            if (label.codePointCount(0, label.length) > OPTION_LABEL_MAX_CHARS) {
+                continue
+            }
+            if (payload.codePointCount(0, payload.length) > OPTION_PAYLOAD_MAX_CHARS) {
+                continue
+            }
+            if (!distinct.add(payload)) {
+                continue
+            }
+            normalized += OptionDraft(label = label, payload = payload)
+            if (normalized.size == OPTIONS_REQUIRED_COUNT) {
+                break
+            }
+        }
+        if (normalized.size < OPTIONS_REQUIRED_COUNT) {
+            return null
+        }
+        return normalized.mapIndexed { index, option ->
+            AssistantOptionDto(
+                id = "opt_${index + 1}",
+                label = option.label,
+                payload = option.payload
+            )
+        }
+    }
+
+    private fun defaultOptions(): List<AssistantOptionDto> {
+        return listOf(
+            AssistantOptionDto(
+                id = "opt_1",
+                label = "请继续解释",
+                payload = "请继续解释，并给我更具体一点的建议。"
+            ),
+            AssistantOptionDto(
+                id = "opt_2",
+                label = "帮我做总结",
+                payload = "请把刚才的回答总结成三点重点。"
+            ),
+            AssistantOptionDto(
+                id = "opt_3",
+                label = "下一步怎么做",
+                payload = "结合我现在的情况，我下一步具体该怎么做？"
+            )
+        )
+    }
+
+    private fun parseStoredOptionsJson(raw: String): List<AssistantOptionDto>? {
+        val parsed = runCatching {
+            json.decodeFromString<List<AssistantOptionDto>>(raw)
+        }.getOrNull() ?: return null
+        if (parsed.isEmpty()) {
+            return null
+        }
+        return parsed
+    }
+
     private suspend fun safeEmitErrorEvent(generationId: String, code: Int, message: String) {
         runCatching {
             appendAndPublishEvent(
@@ -527,7 +746,7 @@ class AiChatService(
                 )
 
             val conversationRef = generation[AiGenerationsTable.conversationId]
-            val requestPayload = json.decodeFromString(StreamChatRequest.serializer(), generation[AiGenerationsTable.requestPayloadJson])
+            val requestPayload = json.decodeFromString<StreamChatRequest>(generation[AiGenerationsTable.requestPayloadJson])
             val conversation = AiConversationsTable.selectAll().where {
                 AiConversationsTable.id eq conversationRef
             }.first()
@@ -541,11 +760,7 @@ class AiChatService(
             val recentMessages = if (olderCount > 0) allMessages.drop(olderCount) else allMessages
 
             val existingSummary = conversation[AiConversationsTable.summary]
-            val summaryToUse = if (olderMessages.isNotEmpty()) {
-                generateSummary(olderMessages)
-            } else {
-                existingSummary
-            }
+            val summaryToUse = if (olderMessages.isNotEmpty()) generateSummary(olderMessages) else existingSummary
             if (summaryToUse != existingSummary) {
                 AiConversationsTable.update({ AiConversationsTable.id eq conversationRef }) {
                     it[summary] = summaryToUse
@@ -568,6 +783,7 @@ class AiChatService(
 
             GenerationContext(
                 conversationId = conversationRef.value,
+                currentUserMessage = requestPayload.userMessage.trim(),
                 temperature = requestPayload.temperature,
                 maxTokens = requestPayload.maxTokens,
                 messages = messages
@@ -575,7 +791,12 @@ class AiChatService(
         }
     }
 
-    private suspend fun persistAssistantMessage(generationId: String, content: String, completionTokens: Int?): Long {
+    private suspend fun persistAssistantMessage(
+        generationId: String,
+        content: String,
+        options: List<AssistantOptionDto>,
+        completionTokens: Int?
+    ): Long {
         return DatabaseFactory.dbQuery {
             val generation = AiGenerationsTable.selectAll().where {
                 AiGenerationsTable.generationId eq generationId
@@ -593,6 +814,7 @@ class AiChatService(
                 it[AiMessagesTable.userId] = userRef
                 it[role] = AiMessageRole.ASSISTANT
                 it[AiMessagesTable.content] = content
+                it[optionsJson] = json.encodeToString(options)
                 it[AiMessagesTable.clientMessageId] = null
                 it[AiMessagesTable.generationId] = generationId
                 it[tokenCount] = completionTokens
@@ -757,7 +979,7 @@ class AiChatService(
             it[AiGenerationsTable.userId] = userRef
             it[AiGenerationsTable.conversationId] = conversationRef
             it[status] = AiGenerationStatus.RUNNING
-            it[requestPayloadJson] = json.encodeToString(StreamChatRequest.serializer(), request)
+            it[requestPayloadJson] = json.encodeToString(request)
             it[errorCode] = null
             it[errorMessage] = null
             it[startedAt] = now

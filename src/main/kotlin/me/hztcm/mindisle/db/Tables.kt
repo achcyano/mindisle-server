@@ -138,6 +138,7 @@ object AiMessagesTable : LongIdTable("ai_messages") {
     val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
     val role = enumerationByName("role", 16, AiMessageRole::class)
     val content = text("content")
+    val optionsJson = text("options_json").nullable()
     val clientMessageId = varchar("client_message_id", 128).nullable()
     val generationId = varchar("generation_id", 64).nullable()
     val tokenCount = integer("token_count").nullable()

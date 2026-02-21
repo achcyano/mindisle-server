@@ -41,6 +41,7 @@ data class MessageListItem(
     val messageId: Long,
     val role: AiMessageRoleDto,
     val content: String,
+    val options: List<AssistantOptionDto>? = null,
     val generationId: String? = null,
     val createdAt: String
 )
@@ -73,6 +74,19 @@ data class StreamDeltaEvent(
 )
 
 @Serializable
+data class AssistantOptionDto(
+    val id: String,
+    val label: String,
+    val payload: String
+)
+
+@Serializable
+data class StreamOptionsEvent(
+    val items: List<AssistantOptionDto>,
+    val source: String
+)
+
+@Serializable
 data class StreamUsageEvent(
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
@@ -82,7 +96,8 @@ data class StreamUsageEvent(
 @Serializable
 data class StreamDoneEvent(
     val assistantMessageId: Long? = null,
-    val finishReason: String? = null
+    val finishReason: String? = null,
+    val hasOptions: Boolean = false
 )
 
 @Serializable

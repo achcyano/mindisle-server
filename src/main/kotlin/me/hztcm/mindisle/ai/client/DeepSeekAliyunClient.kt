@@ -143,13 +143,33 @@ class DeepSeekAliyunClient(
         }
     }
 
+    suspend fun completeTextChat(
+        messages: List<ChatMessage>,
+        temperature: Double? = null,
+        maxTokens: Int? = null
+    ): Pair<String, UsageMetrics?> {
+        val text = StringBuilder()
+        var usage: UsageMetrics? = null
+        streamChat(
+            messages = messages,
+            temperature = temperature,
+            maxTokens = maxTokens
+        ) { chunk ->
+            chunk.contentDelta?.let { text.append(it) }
+            if (chunk.usage != null) {
+                usage = chunk.usage
+            }
+        }
+        return text.toString() to usage
+    }
+
     private fun parseChunk(dataPayload: String): DeepSeekChunk {
         val chunk = try {
             json.decodeFromString<DeepSeekStreamChunk>(dataPayload)
         } catch (e: SerializationException) {
             throw AppException(
                 code = ErrorCodes.AI_UPSTREAM_ERROR,
-                message = "Invalid upstream stream chunk: $e ${e.stackTrace}",
+                message = "Invalid upstream stream chunk",
                 status = HttpStatusCode.BadGateway
             )
         }
