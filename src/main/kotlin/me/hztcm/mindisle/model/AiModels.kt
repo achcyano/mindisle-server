@@ -76,8 +76,7 @@ data class StreamDeltaEvent(
 @Serializable
 data class AssistantOptionDto(
     val id: String,
-    val label: String,
-    val payload: String
+    val label: String
 )
 
 @Serializable

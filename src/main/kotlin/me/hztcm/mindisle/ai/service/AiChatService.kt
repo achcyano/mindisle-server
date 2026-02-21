@@ -69,30 +69,33 @@ private const val OPTIONS_START_MARKER = "<OPTIONS_JSON>"
 private const val OPTIONS_END_MARKER = "</OPTIONS_JSON>"
 private const val OPTIONS_REQUIRED_COUNT = 3
 private const val OPTION_LABEL_MAX_CHARS = 24
-private const val OPTION_PAYLOAD_MAX_CHARS = 80
 private const val DELTA_EMIT_INTERVAL_MS = 40L
 private const val DELTA_EMIT_MAX_CHARS = 64
 
 private const val SYSTEM_PROMPT = """
 You are a patient-care assistant. Respond in Simplified Chinese.
 Keep the answer concise and practical.
+At the end, append clickable options in a JSON block:
+<OPTIONS_JSON>
+{"items":[{"label":"..."},{"label":"..."},{"label":"..."}]}
+</OPTIONS_JSON>
+Each label must start with one emoji and max 24 chars.
 """
 
 private const val FALLBACK_OPTIONS_SYSTEM_PROMPT = """
 You only generate clickable options in JSON.
 Return ONLY this JSON object and nothing else:
-{"items":[{"label":"...","payload":"..."},{"label":"...","payload":"..."},{"label":"...","payload":"..."}]}
+{"items":[{"label":"..."},{"label":"..."},{"label":"..."}]}
 Rules:
 1) Exactly 3 items.
 2) label max 24 chars.
-3) payload max 80 chars.
+3) Each label must start with one emoji (e.g. "💡 继续解释").
 4) Output in Simplified Chinese.
 """
 
 @Serializable
 private data class OptionDraft(
-    val label: String = "",
-    val payload: String = ""
+    val label: String = ""
 )
 
 @Serializable
@@ -680,23 +683,19 @@ class AiChatService(
         val normalized = mutableListOf<OptionDraft>()
         for (item in items) {
             val label = item.label.trim()
-            val payload = item.payload.trim()
-            if (label.isEmpty() || payload.isEmpty()) {
+            if (label.isEmpty()) {
                 continue
             }
-            if (label.any { it.isISOControl() } || payload.any { it.isISOControl() }) {
+            if (label.any { it.isISOControl() }) {
                 continue
             }
             if (label.codePointCount(0, label.length) > OPTION_LABEL_MAX_CHARS) {
                 continue
             }
-            if (payload.codePointCount(0, payload.length) > OPTION_PAYLOAD_MAX_CHARS) {
+            if (!distinct.add(label)) {
                 continue
             }
-            if (!distinct.add(payload)) {
-                continue
-            }
-            normalized += OptionDraft(label = label, payload = payload)
+            normalized += OptionDraft(label = label)
             if (normalized.size == OPTIONS_REQUIRED_COUNT) {
                 break
             }
@@ -707,8 +706,7 @@ class AiChatService(
         return normalized.mapIndexed { index, option ->
             AssistantOptionDto(
                 id = "opt_${index + 1}",
-                label = option.label,
-                payload = option.payload
+                label = option.label
             )
         }
     }
@@ -717,18 +715,15 @@ class AiChatService(
         return listOf(
             AssistantOptionDto(
                 id = "opt_1",
-                label = "请继续解释",
-                payload = "请继续解释，并给我更具体一点的建议。"
+                label = "💡 请继续解释"
             ),
             AssistantOptionDto(
                 id = "opt_2",
-                label = "帮我做总结",
-                payload = "请把刚才的回答总结成三点重点。"
+                label = "🧭 帮我做总结"
             ),
             AssistantOptionDto(
                 id = "opt_3",
-                label = "下一步怎么做",
-                payload = "结合我现在的情况，我下一步具体该怎么做？"
+                label = "✅ 下一步怎么做"
             )
         )
     }
