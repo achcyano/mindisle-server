@@ -15,40 +15,14 @@ internal class AiDeltaOptionFilter(
         val visible = StringBuilder()
 
         while (buffer.isNotEmpty()) {
-            if (insideOptionsBlock) {
-                val endIdx = buffer.indexOf(endMarker)
-                if (endIdx >= 0) {
-                    buffer.delete(0, endIdx + endMarker.length)
-                    insideOptionsBlock = false
-                    continue
-                }
-                // Drop known hidden content aggressively, keep minimal suffix for boundary matching.
-                val keep = minOf(buffer.length, endMarker.length - 1)
-                val drop = buffer.length - keep
-                if (drop > 0) {
-                    buffer.delete(0, drop)
-                }
+            val progressed = if (insideOptionsBlock) {
+                processHiddenSegment()
+            } else {
+                processVisibleSegment(visible)
+            }
+            if (!progressed) {
                 break
             }
-
-            val startIdx = buffer.indexOf(startMarker)
-            if (startIdx >= 0) {
-                if (startIdx > 0) {
-                    visible.append(buffer, 0, startIdx)
-                }
-                buffer.delete(0, startIdx + startMarker.length)
-                insideOptionsBlock = true
-                continue
-            }
-
-            // Keep marker-length tail to avoid leaking partial marker across chunk boundaries.
-            val keep = minOf(buffer.length, startMarker.length - 1)
-            val emit = buffer.length - keep
-            if (emit > 0) {
-                visible.append(buffer, 0, emit)
-                buffer.delete(0, emit)
-            }
-            break
         }
 
         return visible.toString()
@@ -62,5 +36,48 @@ internal class AiDeltaOptionFilter(
         val tail = buffer.toString()
         buffer.setLength(0)
         return tail
+    }
+
+    private fun processHiddenSegment(): Boolean {
+        val endIdx = buffer.indexOf(endMarker)
+        if (endIdx >= 0) {
+            buffer.delete(0, endIdx + endMarker.length)
+            insideOptionsBlock = false
+            return true
+        }
+        keepSuffixForBoundary(endMarker.length)
+        return false
+    }
+
+    private fun processVisibleSegment(visible: StringBuilder): Boolean {
+        val startIdx = buffer.indexOf(startMarker)
+        if (startIdx >= 0) {
+            if (startIdx > 0) {
+                visible.append(buffer, 0, startIdx)
+            }
+            buffer.delete(0, startIdx + startMarker.length)
+            insideOptionsBlock = true
+            return true
+        }
+        emitStableVisibleTail(visible, startMarker.length)
+        return false
+    }
+
+    private fun keepSuffixForBoundary(markerLength: Int) {
+        val keep = minOf(buffer.length, markerLength - 1)
+        val drop = buffer.length - keep
+        if (drop > 0) {
+            buffer.delete(0, drop)
+        }
+    }
+
+    private fun emitStableVisibleTail(visible: StringBuilder, markerLength: Int) {
+        // Keep marker-length tail to avoid leaking partial marker across chunk boundaries.
+        val keep = minOf(buffer.length, markerLength - 1)
+        val emit = buffer.length - keep
+        if (emit > 0) {
+            visible.append(buffer, 0, emit)
+            buffer.delete(0, emit)
+        }
     }
 }
