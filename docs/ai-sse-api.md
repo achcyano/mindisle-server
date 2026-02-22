@@ -9,6 +9,7 @@
 - 历史会话与消息按用户持久化保存
 - 每轮助手回复会返回 3 个可点击选项
 - 选项结构已调整：`option` 仅返回 `id`、`label`，不再返回 `payload`
+- 对话标题默认策略：若创建会话时未传 `title`，在首条用户消息发送时自动用“第一句话前部分文字”生成标题（最多 20 字）
 - 点击语义：客户端点击后，将 `option.label` 作为下一轮 `userMessage` 发给服务端
 
 ## 2. 主要接口
@@ -26,12 +27,34 @@
 
 - `GET /api/v1/ai/conversations?limit=20&cursor=<optional>`
 
-### 2.3 历史消息
+### 2.3 修改会话标题
+
+- `PUT /api/v1/ai/conversations/{conversationId}/title`
+- body:
+
+```json
+{ "title": "新的标题" }
+```
+- response `data`:
+
+```json
+{
+  "conversationId": 123,
+  "title": "新的标题",
+  "updatedAt": "2026-02-22T08:00:00Z"
+}
+```
+
+### 2.4 删除会话
+
+- `DELETE /api/v1/ai/conversations/{conversationId}`
+- 说明：删除后会级联删除该会话的消息、生成任务及流事件历史
+- response：`ApiResponse<Unit>`（`data` 为 `null`）
+### 2.5 历史消息
 
 - `GET /api/v1/ai/conversations/{conversationId}/messages?limit=50&before=<optional>`
 - assistant 消息会带 `options` 字段（见第 4 节）
-
-### 2.4 发起流式对话
+### 2.6 发起流式对话
 
 - `POST /api/v1/ai/conversations/{conversationId}/stream`
 - headers:
@@ -50,7 +73,7 @@
 }
 ```
 
-### 2.5 按 generation 重连
+### 2.7 按 generation 重连
 
 - `GET /api/v1/ai/generations/{generationId}/stream`
 - headers:
@@ -74,7 +97,7 @@ data: <json>
 标准顺序：
 
 1. `meta`
-2. `delta`（流式增量文本）
+2. `delta`（流式增量文本；服务端会过滤 `<OPTIONS_JSON>...</OPTIONS_JSON>` 块）
 3. `usage`（可选）
 4. `options`（必有）
 5. `done`

@@ -40,17 +40,21 @@ import me.hztcm.mindisle.model.StreamErrorEvent
 import me.hztcm.mindisle.model.StreamMetaEvent
 import me.hztcm.mindisle.model.StreamOptionsEvent
 import me.hztcm.mindisle.model.StreamUsageEvent
+import me.hztcm.mindisle.model.UpdateConversationTitleResponse
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+
+private const val AUTO_TITLE_MAX_CHARS = 20
 
 class AiChatService(
     private val config: LlmConfig,
@@ -66,10 +70,11 @@ class AiChatService(
     suspend fun createConversation(userId: Long, title: String?): CreateConversationResponse {
         AiRequestValidators.validateTitle(title)
         val now = utcNow()
+        val normalizedTitle = title?.trim()?.takeIf { it.isNotBlank() }
         return DatabaseFactory.dbQuery {
             val conversationId = AiConversationsTable.insert {
                 it[AiConversationsTable.userId] = EntityID(userId, UsersTable)
-                it[AiConversationsTable.title] = title?.trim()
+                it[AiConversationsTable.title] = normalizedTitle
                 it[summary] = null
                 it[createdAt] = now
                 it[updatedAt] = now
@@ -78,9 +83,59 @@ class AiChatService(
 
             CreateConversationResponse(
                 conversationId = conversationId,
-                title = title?.trim(),
+                title = normalizedTitle,
                 createdAt = now.toIsoInstant()
             )
+        }
+    }
+
+    suspend fun updateConversationTitle(
+        userId: Long,
+        conversationId: Long,
+        title: String
+    ): UpdateConversationTitleResponse {
+        val normalizedTitle = title.trim()
+        if (normalizedTitle.isBlank()) {
+            throw AppException(
+                code = ErrorCodes.AI_INVALID_ARGUMENT,
+                message = "title is required",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+        AiRequestValidators.validateTitle(normalizedTitle)
+        val now = utcNow()
+        return DatabaseFactory.dbQuery {
+            getOwnedConversation(userId, conversationId)
+            val conversationRef = EntityID(conversationId, AiConversationsTable)
+            AiConversationsTable.update({ AiConversationsTable.id eq conversationRef }) {
+                it[AiConversationsTable.title] = normalizedTitle
+                it[updatedAt] = now
+            }
+            UpdateConversationTitleResponse(
+                conversationId = conversationId,
+                title = normalizedTitle,
+                updatedAt = now.toIsoInstant()
+            )
+        }
+    }
+
+    suspend fun deleteConversation(userId: Long, conversationId: Long) {
+        val generationIds = DatabaseFactory.dbQuery {
+            getOwnedConversation(userId, conversationId)
+            val conversationRef = EntityID(conversationId, AiConversationsTable)
+            val ids = AiGenerationsTable.selectAll().where {
+                AiGenerationsTable.conversationId eq conversationRef
+            }.map { it[AiGenerationsTable.generationId] }
+
+            ids.forEach { generationId ->
+                AiStreamEventsTable.deleteWhere { AiStreamEventsTable.generationId eq generationId }
+            }
+            AiConversationsTable.deleteWhere { AiConversationsTable.id eq conversationRef }
+            ids
+        }
+        generationIds.forEach { generationId ->
+            generationJobs.remove(generationId)?.cancel()
+            subscribers.remove(generationId)?.forEach { channel -> channel.close() }
         }
     }
 
@@ -150,11 +205,16 @@ class AiChatService(
         val requestPayloadJson = json.encodeToString(request)
 
         val result = DatabaseFactory.dbQuery {
-            getOwnedConversation(userId, conversationId)
+            val ownedConversation = getOwnedConversation(userId, conversationId)
             val conversationRef = EntityID(conversationId, AiConversationsTable)
             val userRef = EntityID(userId, UsersTable)
             val userMessage = request.userMessage.trim()
             val clientMessageId = request.clientMessageId.trim()
+            val autoTitle = if (ownedConversation[AiConversationsTable.title].isNullOrBlank()) {
+                deriveAutoConversationTitle(userMessage)
+            } else {
+                null
+            }
 
             val existing = AiMessagesTable.selectAll().where {
                 (AiMessagesTable.userId eq userRef) and
@@ -179,6 +239,12 @@ class AiChatService(
                         requestPayloadJson = requestPayloadJson,
                         now = now
                     )
+                if (autoTitle != null) {
+                    AiConversationsTable.update({ AiConversationsTable.id eq conversationRef }) {
+                        it[AiConversationsTable.title] = autoTitle
+                        it[updatedAt] = now
+                    }
+                }
                 generationId to false
             } else {
                 val userMessageId = AiMessagesTable.insert {
@@ -199,6 +265,12 @@ class AiChatService(
                     requestPayloadJson = requestPayloadJson,
                     now = now
                 )
+                if (autoTitle != null) {
+                    AiConversationsTable.update({ AiConversationsTable.id eq conversationRef }) {
+                        it[AiConversationsTable.title] = autoTitle
+                        it[updatedAt] = now
+                    }
+                }
                 generationId to true
             }
         }
@@ -371,6 +443,7 @@ class AiChatService(
     private suspend fun runGeneration(generationId: String) {
         val rawAssistant = StringBuilder()
         val pendingDelta = StringBuilder()
+        val deltaFilter = AiDeltaOptionFilter()
         var finishReason: String? = null
         var usage: UsageMetrics? = null
         var lastDeltaEmitAt = 0L
@@ -428,8 +501,11 @@ class AiChatService(
             ) { chunk ->
                 chunk.contentDelta?.takeIf { it.isNotEmpty() }?.let { delta ->
                     rawAssistant.append(delta)
-                    pendingDelta.append(delta)
-                    flushDelta()
+                    val visible = deltaFilter.accept(delta)
+                    if (visible.isNotEmpty()) {
+                        pendingDelta.append(visible)
+                        flushDelta()
+                    }
                 }
                 if (!chunk.finishReason.isNullOrBlank()) {
                     finishReason = chunk.finishReason
@@ -437,6 +513,10 @@ class AiChatService(
                 if (chunk.usage != null) {
                     usage = chunk.usage
                 }
+            }
+            val visibleTail = deltaFilter.flushRemainder()
+            if (visibleTail.isNotEmpty()) {
+                pendingDelta.append(visibleTail)
             }
             flushDelta(force = true)
 
@@ -666,6 +746,24 @@ class AiChatService(
                 channel.trySend(event)
             }
         }
+    }
+
+    private fun deriveAutoConversationTitle(message: String): String? {
+        val compact = message.trim().replace(Regex("\\s+"), " ")
+        if (compact.isBlank()) {
+            return null
+        }
+        val firstSentence = compact.split(Regex("[。！？!?\\n\\r]"), limit = 2).firstOrNull()?.trim().orEmpty()
+        val base = if (firstSentence.isNotBlank()) firstSentence else compact
+        return truncateCodePoints(base, AUTO_TITLE_MAX_CHARS).takeIf { it.isNotBlank() }
+    }
+
+    private fun truncateCodePoints(text: String, maxCodePoints: Int): String {
+        if (text.codePointCount(0, text.length) <= maxCodePoints) {
+            return text
+        }
+        val end = text.offsetByCodePoints(0, maxCodePoints)
+        return text.substring(0, end).trimEnd()
     }
 
 }

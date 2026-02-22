@@ -11,8 +11,10 @@ import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondTextWriter
 import io.ktor.server.routing.Route
+import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 import kotlinx.coroutines.withTimeoutOrNull
 import me.hztcm.mindisle.ai.service.AiChatService
@@ -22,6 +24,7 @@ import me.hztcm.mindisle.common.ErrorCodes
 import me.hztcm.mindisle.model.ApiResponse
 import me.hztcm.mindisle.model.CreateConversationRequest
 import me.hztcm.mindisle.model.StreamChatRequest
+import me.hztcm.mindisle.model.UpdateConversationTitleRequest
 import me.hztcm.mindisle.security.UserPrincipal
 
 fun Route.registerAiRoutes(service: AiChatService) {
@@ -32,6 +35,25 @@ fun Route.registerAiRoutes(service: AiChatService) {
                 val request = call.receive<CreateConversationRequest>()
                 val data = service.createConversation(principal.userId, request.title)
                 call.respond(HttpStatusCode.Created, ApiResponse(data = data))
+            }
+
+            put("/conversations/{conversationId}/title") {
+                val principal = call.requirePrincipal()
+                val conversationId = call.requirePathLong("conversationId")
+                val request = call.receive<UpdateConversationTitleRequest>()
+                val data = service.updateConversationTitle(
+                    userId = principal.userId,
+                    conversationId = conversationId,
+                    title = request.title
+                )
+                call.respond(ApiResponse(data = data))
+            }
+
+            delete("/conversations/{conversationId}") {
+                val principal = call.requirePrincipal()
+                val conversationId = call.requirePathLong("conversationId")
+                service.deleteConversation(principal.userId, conversationId)
+                call.respond(ApiResponse<Unit>())
             }
 
             get("/conversations") {

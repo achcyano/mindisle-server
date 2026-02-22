@@ -15,6 +15,18 @@ data class CreateConversationResponse(
 )
 
 @Serializable
+data class UpdateConversationTitleRequest(
+    val title: String
+)
+
+@Serializable
+data class UpdateConversationTitleResponse(
+    val conversationId: Long,
+    val title: String,
+    val updatedAt: String
+)
+
+@Serializable
 data class ConversationListItem(
     val conversationId: Long,
     val title: String? = null,
