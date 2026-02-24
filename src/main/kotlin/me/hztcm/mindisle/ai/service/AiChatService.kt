@@ -45,7 +45,9 @@ import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.isNotNull
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
@@ -175,9 +177,17 @@ class AiChatService(
         }
 
         return DatabaseFactory.dbQuery {
+            val conversationRef = EntityID(conversationId, AiConversationsTable)
             val condition = (AiMessagesTable.userId eq EntityID(userId, UsersTable)) and
-                (AiMessagesTable.conversationId eq EntityID(conversationId, AiConversationsTable)) and
+                (AiMessagesTable.conversationId eq conversationRef) and
                 if (beforeId != null) (AiMessagesTable.id less beforeId) else (AiMessagesTable.id greater 0L)
+
+            val latestOptionsMessageId = AiMessagesTable.selectAll().where {
+                (AiMessagesTable.userId eq EntityID(userId, UsersTable)) and
+                    (AiMessagesTable.conversationId eq conversationRef) and
+                    (AiMessagesTable.role eq AiMessageRole.ASSISTANT) and
+                    AiMessagesTable.optionsJson.isNotNull()
+            }.orderBy(AiMessagesTable.id, SortOrder.DESC).limit(1).firstOrNull()?.get(AiMessagesTable.id)?.value
 
             val rows = AiMessagesTable.selectAll().where {
                 condition
@@ -189,7 +199,11 @@ class AiChatService(
                     messageId = it[AiMessagesTable.id].value,
                     role = it[AiMessagesTable.role].toDto(),
                     content = it[AiMessagesTable.content],
-                    options = it[AiMessagesTable.optionsJson]?.let(optionResolver::parseStoredOptionsJson),
+                    options = if (it[AiMessagesTable.id].value == latestOptionsMessageId) {
+                        it[AiMessagesTable.optionsJson]?.let(optionResolver::parseStoredOptionsJson)
+                    } else {
+                        null
+                    },
                     generationId = it[AiMessagesTable.generationId],
                     createdAt = it[AiMessagesTable.createdAt].toIsoInstant()
                 )
@@ -677,14 +691,24 @@ class AiChatService(
                 it[AiMessagesTable.generationId] = generationId
                 it[tokenCount] = completionTokens
                 it[createdAt] = now
-            }[AiMessagesTable.id].value
+            }[AiMessagesTable.id]
+
+            // Keep only the newest assistant options for this conversation.
+            AiMessagesTable.update({
+                (AiMessagesTable.conversationId eq conversationRef) and
+                    (AiMessagesTable.role eq AiMessageRole.ASSISTANT) and
+                    (AiMessagesTable.id neq messageId) and
+                    AiMessagesTable.optionsJson.isNotNull()
+            }) {
+                it[optionsJson] = null
+            }
 
             AiConversationsTable.update({ AiConversationsTable.id eq conversationRef }) {
                 it[updatedAt] = now
                 it[lastMessageAt] = now
             }
 
-            messageId
+            messageId.value
         }
     }
 

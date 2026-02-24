@@ -26,6 +26,36 @@ enum class AiGenerationStatus {
     CANCELLED
 }
 
+enum class ScaleStatus {
+    DRAFT,
+    PUBLISHED,
+    ARCHIVED
+}
+
+enum class ScaleQuestionType {
+    SINGLE_CHOICE,
+    MULTI_CHOICE,
+    TEXT,
+    TIME,
+    DURATION,
+    YES_NO
+}
+
+enum class ScaleScoringMethod {
+    SIMPLE_SUM,
+    PHQ9,
+    GAD7,
+    PSQI,
+    SCL90,
+    EPQ
+}
+
+enum class ScaleSessionStatus {
+    IN_PROGRESS,
+    SUBMITTED,
+    ABANDONED
+}
+
 object UsersTable : LongIdTable("users") {
     val phone = varchar("phone", 20).uniqueIndex()
     val passwordHash = varchar("password_hash", 255)
@@ -181,4 +211,124 @@ object AiStreamEventsTable : LongIdTable("ai_stream_events") {
         uniqueIndex(generationId, seq)
         index(false, generationId, createdAt)
     }
+}
+
+object ScalesTable : LongIdTable("scales") {
+    val code = varchar("code", 64).uniqueIndex()
+    val name = varchar("name", 200)
+    val description = text("description").nullable()
+    val status = enumerationByName("status", 16, ScaleStatus::class).default(ScaleStatus.PUBLISHED)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+}
+
+object ScaleVersionsTable : LongIdTable("scale_versions") {
+    val scaleId = reference("scale_id", ScalesTable, onDelete = ReferenceOption.CASCADE)
+    val version = integer("version")
+    val status = enumerationByName("status", 16, ScaleStatus::class).default(ScaleStatus.PUBLISHED)
+    val publishedAt = datetime("published_at").nullable()
+    val configJson = text("config_json").nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        uniqueIndex(scaleId, version)
+        index(false, scaleId, status, publishedAt)
+    }
+}
+
+object ScaleQuestionsTable : LongIdTable("scale_questions") {
+    val versionId = reference("version_id", ScaleVersionsTable, onDelete = ReferenceOption.CASCADE)
+    val questionKey = varchar("question_key", 64)
+    val orderNo = integer("order_no")
+    val type = enumerationByName("type", 24, ScaleQuestionType::class)
+    val dimension = varchar("dimension", 64).nullable()
+    val required = bool("required").default(true)
+    val scorable = bool("scorable").default(true)
+    val reverseScored = bool("reverse_scored").default(false)
+    val stem = text("stem")
+    val hint = text("hint").nullable()
+    val note = text("note").nullable()
+    val optionSetCode = varchar("option_set_code", 64).nullable()
+    val metaJson = text("meta_json").nullable()
+
+    init {
+        uniqueIndex(versionId, questionKey)
+        index(false, versionId, orderNo)
+    }
+}
+
+object ScaleOptionsTable : LongIdTable("scale_options") {
+    val questionId = reference("question_id", ScaleQuestionsTable, onDelete = ReferenceOption.CASCADE)
+    val optionKey = varchar("option_key", 64)
+    val orderNo = integer("order_no")
+    val label = varchar("label", 255)
+    val scoreValue = decimal("score_value", 10, 2).nullable()
+    val extJson = text("ext_json").nullable()
+
+    init {
+        uniqueIndex(questionId, optionKey)
+        index(false, questionId, orderNo)
+    }
+}
+
+object ScaleScoringRulesTable : LongIdTable("scale_scoring_rules") {
+    val versionId = reference("version_id", ScaleVersionsTable, onDelete = ReferenceOption.CASCADE).uniqueIndex()
+    val method = enumerationByName("method", 24, ScaleScoringMethod::class)
+    val ruleJson = text("rule_json")
+    val createdAt = datetime("created_at")
+}
+
+object ScaleResultBandsTable : LongIdTable("scale_result_bands") {
+    val versionId = reference("version_id", ScaleVersionsTable, onDelete = ReferenceOption.CASCADE)
+    val dimension = varchar("dimension", 64).nullable()
+    val minScore = decimal("min_score", 10, 2)
+    val maxScore = decimal("max_score", 10, 2)
+    val levelCode = varchar("level_code", 64)
+    val levelName = varchar("level_name", 100)
+    val interpretation = text("interpretation")
+
+    init {
+        index(false, versionId, dimension, minScore, maxScore)
+    }
+}
+
+object UserScaleSessionsTable : LongIdTable("user_scale_sessions") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val scaleId = reference("scale_id", ScalesTable, onDelete = ReferenceOption.RESTRICT)
+    val versionId = reference("version_id", ScaleVersionsTable, onDelete = ReferenceOption.RESTRICT)
+    val status = enumerationByName("status", 16, ScaleSessionStatus::class)
+    val progress = integer("progress").default(0)
+    val startedAt = datetime("started_at")
+    val updatedAt = datetime("updated_at")
+    val submittedAt = datetime("submitted_at").nullable()
+
+    init {
+        index(false, userId, status, updatedAt)
+        index(false, userId, scaleId, status)
+    }
+}
+
+object UserScaleAnswersTable : LongIdTable("user_scale_answers") {
+    val sessionId = reference("session_id", UserScaleSessionsTable, onDelete = ReferenceOption.CASCADE)
+    val questionId = reference("question_id", ScaleQuestionsTable, onDelete = ReferenceOption.RESTRICT)
+    val answerJson = text("answer_json")
+    val numericScore = decimal("numeric_score", 10, 2).nullable()
+    val answeredAt = datetime("answered_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        uniqueIndex(sessionId, questionId)
+        index(false, sessionId, updatedAt)
+    }
+}
+
+object UserScaleResultsTable : LongIdTable("user_scale_results") {
+    val sessionId = reference("session_id", UserScaleSessionsTable, onDelete = ReferenceOption.CASCADE).uniqueIndex()
+    val totalScore = decimal("total_score", 10, 2).nullable()
+    val dimensionScoresJson = text("dimension_scores_json").nullable()
+    val resultDetailJson = text("result_detail_json").nullable()
+    val bandLevelCode = varchar("band_level_code", 64).nullable()
+    val resultText = text("result_text").nullable()
+    val computedAt = datetime("computed_at")
 }

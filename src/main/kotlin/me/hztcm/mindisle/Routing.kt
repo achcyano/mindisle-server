@@ -8,13 +8,16 @@ import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import me.hztcm.mindisle.ai.api.registerAiRoutes
 import me.hztcm.mindisle.ai.service.AiChatService
+import me.hztcm.mindisle.scale.api.registerScaleRoutes
+import me.hztcm.mindisle.scale.service.ScaleService
 import me.hztcm.mindisle.user.api.registerAuthRoutes
 import me.hztcm.mindisle.user.api.registerUserRoutes
 import me.hztcm.mindisle.user.service.UserManagementService
 
 fun Application.configureRouting(
     userService: UserManagementService,
-    aiChatService: AiChatService
+    aiChatService: AiChatService,
+    scaleService: ScaleService
 ) {
     routing {
         get("/") {
@@ -29,6 +32,7 @@ fun Application.configureRouting(
             registerAuthRoutes(userService)
             registerUserRoutes(userService)
             registerAiRoutes(aiChatService)
+            registerScaleRoutes(scaleService)
         }
     }
 }

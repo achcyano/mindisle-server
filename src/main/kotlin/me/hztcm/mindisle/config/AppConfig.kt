@@ -52,6 +52,11 @@ data class LlmConfig(
     val maxClientMessageIdChars: Int
 )
 
+data class ScaleConfig(
+    val openTextAnswerMinChars: Int,
+    val openTextAnswerMaxChars: Int
+)
+
 object AppConfig {
     val db = DbConfig(
         jdbcUrl = dotenv["DB_URL"] ?: "jdbc:mysql://localhost:3306/mindisle?useSSL=false&serverTimezone=UTC&verifyServerCertificate=false&useUnicode=true&characterEncoding=utf8",
@@ -101,5 +106,10 @@ object AppConfig {
         requestTimeoutSeconds = dotenv["LLM_REQUEST_TIMEOUT_SECONDS"]?.toLongOrNull() ?: 120L,
         maxUserMessageChars = dotenv["LLM_MAX_USER_MESSAGE_CHARS"]?.toIntOrNull() ?: 8_000,
         maxClientMessageIdChars = dotenv["LLM_MAX_CLIENT_MESSAGE_ID_CHARS"]?.toIntOrNull() ?: 128
+    )
+
+    val scale = ScaleConfig(
+        openTextAnswerMinChars = dotenv["SCALE_OPEN_TEXT_ANSWER_MIN_CHARS"]?.toIntOrNull() ?: 1,
+        openTextAnswerMaxChars = dotenv["SCALE_OPEN_TEXT_ANSWER_MAX_CHARS"]?.toIntOrNull() ?: 200
     )
 }

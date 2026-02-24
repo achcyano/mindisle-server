@@ -12,6 +12,7 @@ import me.hztcm.mindisle.ai.service.AiChatService
 import me.hztcm.mindisle.common.configureStatusPages
 import me.hztcm.mindisle.config.AppConfig
 import me.hztcm.mindisle.db.DatabaseFactory
+import me.hztcm.mindisle.scale.service.ScaleService
 import me.hztcm.mindisle.security.JwtService
 import me.hztcm.mindisle.security.configureAuth
 import me.hztcm.mindisle.sms.createSmsGateway
@@ -46,10 +47,11 @@ fun Application.module() {
     val userService = UserManagementService(AppConfig.auth, jwtService, smsGateway)
     val deepSeekClient = DeepSeekAliyunClient(AppConfig.llm)
     val aiChatService = AiChatService(AppConfig.llm, deepSeekClient)
+    val scaleService = ScaleService(AppConfig.llm, deepSeekClient, AppConfig.scale)
 
     configureStatusPages()
     configureAuth(jwtService)
-    configureRouting(userService, aiChatService)
+    configureRouting(userService, aiChatService, scaleService)
 
     monitor.subscribe(ApplicationStopping) {
         runCatching { aiChatService.close() }

@@ -40,8 +40,18 @@ object DatabaseFactory {
                 AiConversationsTable,
                 AiMessagesTable,
                 AiGenerationsTable,
-                AiStreamEventsTable
+                AiStreamEventsTable,
+                ScalesTable,
+                ScaleVersionsTable,
+                ScaleQuestionsTable,
+                ScaleOptionsTable,
+                ScaleScoringRulesTable,
+                ScaleResultBandsTable,
+                UserScaleSessionsTable,
+                UserScaleAnswersTable,
+                UserScaleResultsTable
             )
+            ScaleSeedData.seedDefaultsIfEmpty()
         }
     }
 
