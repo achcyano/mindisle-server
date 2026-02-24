@@ -76,20 +76,25 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
 import java.math.BigDecimal
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedDeque
 
 private const val SCALE_ASSIST_EVENT_META = "meta"
 private const val SCALE_ASSIST_EVENT_DELTA = "delta"
 private const val SCALE_ASSIST_EVENT_DONE = "done"
 private const val SCALE_ASSIST_EVENT_ERROR = "error"
+private const val SCALE_ASSIST_MAX_CONTEXT_ROUNDS = 5
+private const val SCALE_ASSIST_MAX_CONTEXT_TEXT_CHARS = 600
 
 private const val SCALE_ASSIST_SYSTEM_PROMPT = """
 你是心理量表答题助手。
 任务边界：
-1) 只解释题意、作答方式、选项差异，不替用户代答。
-2) 不做医疗诊断，不下确定性结论。
-3) 对于自伤自杀等高风险内容，提醒尽快联系医生或紧急求助。
-4) 回复简洁，优先给可执行建议。
-5) 永远使用简体中文。
+1) 可以解释题意、作答方式、选项差异，不替用户代答。
+2) 解答用户对题目的疑问。
+3) 不做医疗诊断，不下确定性结论。
+4) 对于自伤自杀等高风险内容，提醒尽快联系医生或紧急求助。
+5) 回复简洁，优先给可执行建议。
+6) 永远使用简体中文。
 """
 
 data class ScaleAssistStreamEventRecord(
@@ -116,12 +121,24 @@ private data class ScaleAssistContext(
     val options: List<ScaleAssistOption> = emptyList()
 )
 
+private data class ScaleAssistHistoryKey(
+    val userId: Long,
+    val sessionId: Long,
+    val questionId: Long
+)
+
+private data class ScaleAssistRound(
+    val userText: String,
+    val assistantText: String
+)
+
 class ScaleService(
     private val config: LlmConfig,
     private val deepSeekClient: DeepSeekAliyunClient,
     private val scaleConfig: ScaleConfig
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val assistContextHistory = ConcurrentHashMap<ScaleAssistHistoryKey, ConcurrentLinkedDeque<ScaleAssistRound>>()
 
     suspend fun listScales(userId: Long, limit: Int, cursor: String?, status: ScaleStatus?): ListScalesResponse {
         val safeLimit = limit.coerceIn(1, 50)
@@ -651,6 +668,12 @@ class ScaleService(
         val assistContext = DatabaseFactory.dbQuery {
             loadAssistContext(userId, request.sessionId, request.questionId)
         }
+        val historyKey = ScaleAssistHistoryKey(
+            userId = userId,
+            sessionId = request.sessionId,
+            questionId = request.questionId
+        )
+        val contextRounds = loadAssistContextRounds(historyKey)
         val generationId = generateSecureToken(18)
         var seq = 1L
         suspend fun emit(eventType: String, eventJson: String) {
@@ -674,7 +697,8 @@ class ScaleService(
             )
         )
 
-        val userPrompt = buildAssistPrompt(assistContext, request.userDraftAnswer)
+        val userPrompt = buildAssistPrompt(assistContext, request.userDraftAnswer, contextRounds)
+        val assistantReply = StringBuilder()
         runCatching {
             deepSeekClient.streamChat(
                 messages = listOf(
@@ -685,11 +709,17 @@ class ScaleService(
                 maxTokens = 1024
             ) { chunk ->
                 val text = chunk.contentDelta?.takeIf { it.isNotEmpty() } ?: return@streamChat
+                assistantReply.append(text)
                 emit(
                     SCALE_ASSIST_EVENT_DELTA,
                     json.encodeToString(ScaleAssistDeltaEvent(text = text))
                 )
             }
+            appendAssistContextRound(
+                key = historyKey,
+                userDraftAnswer = request.userDraftAnswer,
+                assistantResponse = assistantReply.toString()
+            )
             emit(
                 SCALE_ASSIST_EVENT_DONE,
                 json.encodeToString(
@@ -724,7 +754,11 @@ class ScaleService(
         }
     }
 
-    private fun buildAssistPrompt(context: ScaleAssistContext, userDraftAnswer: String?): String {
+    private fun buildAssistPrompt(
+        context: ScaleAssistContext,
+        userDraftAnswer: String?,
+        contextRounds: List<ScaleAssistRound>
+    ): String {
         val optionsText = if (context.options.isEmpty()) {
             "（无选项）"
         } else {
@@ -739,6 +773,13 @@ class ScaleService(
         val noteText = context.note?.takeIf { it.isNotBlank() } ?: "无"
         val hintText = context.hint?.takeIf { it.isNotBlank() } ?: "无"
         val draftText = userDraftAnswer?.takeIf { it.isNotBlank() } ?: "无"
+        val historyText = if (contextRounds.isEmpty()) {
+            "无"
+        } else {
+            contextRounds.mapIndexed { index, round ->
+                "${index + 1}) 用户：${round.userText}\n   助手：${round.assistantText}"
+            }.joinToString(separator = "\n")
+        }
         return """
 量表上下文：scaleId=${context.scaleId}, scaleCode=${context.scaleCode}, scaleName=${context.scaleName}
 会话：sessionId=${context.sessionId}
@@ -755,11 +796,52 @@ $hintText
 注意事项：
 $noteText
 
+最近对话上下文（同一用户、同一会话、同一题目，最多5轮）：
+$historyText
+
 用户草稿答案（可能为空）：
 $draftText
 
 请先解释题意，再给出如何选择的建议，禁止替用户做最终选择。若该题属于高风险内容（如自伤），补充求助建议。
 """.trimIndent()
+    }
+
+    private fun loadAssistContextRounds(key: ScaleAssistHistoryKey): List<ScaleAssistRound> {
+        return assistContextHistory[key]?.toList()?.takeLast(SCALE_ASSIST_MAX_CONTEXT_ROUNDS).orEmpty()
+    }
+
+    private fun appendAssistContextRound(
+        key: ScaleAssistHistoryKey,
+        userDraftAnswer: String?,
+        assistantResponse: String
+    ) {
+        val userText = normalizeAssistContextText(userDraftAnswer) ?: return
+        val assistantText = normalizeAssistContextText(assistantResponse) ?: return
+        val deque = assistContextHistory.computeIfAbsent(key) { ConcurrentLinkedDeque() }
+        deque.addLast(
+            ScaleAssistRound(
+                userText = userText,
+                assistantText = assistantText
+            )
+        )
+        while (deque.size > SCALE_ASSIST_MAX_CONTEXT_ROUNDS) {
+            deque.pollFirst()
+        }
+    }
+
+    private fun normalizeAssistContextText(raw: String?): String? {
+        if (raw == null) {
+            return null
+        }
+        val cleaned = raw.trim().filterNot { it.isISOControl() }
+        if (cleaned.isBlank()) {
+            return null
+        }
+        return if (cleaned.length <= SCALE_ASSIST_MAX_CONTEXT_TEXT_CHARS) {
+            cleaned
+        } else {
+            cleaned.substring(0, SCALE_ASSIST_MAX_CONTEXT_TEXT_CHARS)
+        }
     }
 
     private fun validateAssistRequest(request: ScaleAssistStreamRequest) {

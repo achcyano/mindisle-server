@@ -764,10 +764,9 @@ class AiChatService(
     private fun publish(event: StreamEventRecord) {
         val listeners = subscribers[event.generationId] ?: return
         listeners.forEach { channel ->
-            if (channel.isClosedForSend) {
+            val sendResult = channel.trySend(event)
+            if (sendResult.isClosed) {
                 listeners.remove(channel)
-            } else {
-                channel.trySend(event)
             }
         }
     }
