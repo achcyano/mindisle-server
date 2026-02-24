@@ -63,7 +63,8 @@ data class ScaleListItem(
     val description: String? = null,
     val status: ScaleStatusDto,
     val latestVersion: Int,
-    val publishedAt: String? = null
+    val publishedAt: String? = null,
+    val lastCompletedAt: String? = null
 )
 
 @Serializable

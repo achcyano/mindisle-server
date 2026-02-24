@@ -30,11 +30,11 @@ fun Route.registerScaleRoutes(service: ScaleService) {
     authenticate("auth-jwt") {
         route("/scales") {
             get {
-                call.requirePrincipal()
+                val principal = call.requirePrincipal()
                 val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
                 val cursor = call.request.queryParameters["cursor"]
                 val status = call.request.queryParameters["status"]?.let(::parseScaleStatus)
-                val data = service.listScales(limit = limit, cursor = cursor, status = status)
+                val data = service.listScales(userId = principal.userId, limit = limit, cursor = cursor, status = status)
                 call.respond(ApiResponse(data = data))
             }
 

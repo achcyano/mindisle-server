@@ -123,7 +123,7 @@ class ScaleService(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun listScales(limit: Int, cursor: String?, status: ScaleStatus?): ListScalesResponse {
+    suspend fun listScales(userId: Long, limit: Int, cursor: String?, status: ScaleStatus?): ListScalesResponse {
         val safeLimit = limit.coerceIn(1, 50)
         val cursorId = parseCursor(cursor, "cursor")
         return DatabaseFactory.dbQuery {
@@ -153,18 +153,36 @@ class ScaleService(
 
             val filtered = allRows.filter { latestVersionByScale.containsKey(it[ScalesTable.id].value) }
             val page = filtered.take(safeLimit)
+            val pageScaleRefs = page.map { it[ScalesTable.id] }
+            val latestCompletedAtByScaleId = if (pageScaleRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                UserScaleSessionsTable.selectAll().where {
+                    (UserScaleSessionsTable.userId eq EntityID(userId, UsersTable)) and
+                        (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED) and
+                        (UserScaleSessionsTable.scaleId inList pageScaleRefs)
+                }.toList().groupBy {
+                    it[UserScaleSessionsTable.scaleId].value
+                }.mapValues { (_, rows) ->
+                    rows.mapNotNull { row ->
+                        row[UserScaleSessionsTable.submittedAt]
+                    }.maxOrNull()?.toIsoOffsetPlus8()
+                }
+            }
             val hasMore = filtered.size > safeLimit
             val items = page.map { row ->
-                val versionRow = latestVersionByScale[row[ScalesTable.id].value]
-                    ?: throw scaleVersionNotFound("Published version not found for scale=${row[ScalesTable.id].value}")
+                val scaleId = row[ScalesTable.id].value
+                val versionRow = latestVersionByScale[scaleId]
+                    ?: throw scaleVersionNotFound("Published version not found for scale=$scaleId")
                 ScaleListItem(
-                    scaleId = row[ScalesTable.id].value,
+                    scaleId = scaleId,
                     code = row[ScalesTable.code],
                     name = row[ScalesTable.name],
                     description = row[ScalesTable.description],
                     status = row[ScalesTable.status].toDto(),
                     latestVersion = versionRow[ScaleVersionsTable.version],
-                    publishedAt = versionRow[ScaleVersionsTable.publishedAt]?.toIsoInstant()
+                    publishedAt = versionRow[ScaleVersionsTable.publishedAt]?.toIsoInstant(),
+                    lastCompletedAt = latestCompletedAtByScaleId[scaleId]
                 )
             }
             val nextCursor = if (hasMore) page.lastOrNull()?.get(ScalesTable.id)?.value?.toString() else null
