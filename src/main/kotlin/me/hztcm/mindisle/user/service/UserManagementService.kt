@@ -10,6 +10,8 @@ import me.hztcm.mindisle.db.LoginTicketsTable
 import me.hztcm.mindisle.db.SessionStatus
 import me.hztcm.mindisle.db.SmsVerificationAttemptsTable
 import me.hztcm.mindisle.db.SmsVerificationCodesTable
+import me.hztcm.mindisle.db.UserAvatarsTable
+import me.hztcm.mindisle.db.UserDiseaseHistoriesTable
 import me.hztcm.mindisle.db.UserFamilyHistoriesTable
 import me.hztcm.mindisle.db.UserMedicalHistoriesTable
 import me.hztcm.mindisle.db.UserMedicationHistoriesTable
@@ -29,7 +31,10 @@ import me.hztcm.mindisle.model.SendSmsCodeRequest
 import me.hztcm.mindisle.model.SmsPurpose
 import me.hztcm.mindisle.model.TokenPairResponse
 import me.hztcm.mindisle.model.TokenRefreshRequest
+import me.hztcm.mindisle.model.UpsertBasicProfileRequest
 import me.hztcm.mindisle.model.UpsertProfileRequest
+import me.hztcm.mindisle.model.UserAvatarMetaResponse
+import me.hztcm.mindisle.model.UserBasicProfileResponse
 import me.hztcm.mindisle.model.UserProfileResponse
 import me.hztcm.mindisle.security.JwtService
 import me.hztcm.mindisle.security.PasswordHasher
@@ -47,22 +52,48 @@ import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
+import java.awt.image.BufferedImage
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.math.BigDecimal
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneOffset
+import javax.imageio.ImageIO
 
 class UserManagementService(
     private val config: AuthConfig,
     private val jwtService: JwtService,
     private val smsGateway: SmsGateway?
 ) {
+    data class AvatarBinaryPayload(
+        val bytes: ByteArray,
+        val contentType: String,
+        val sha256: String,
+        val updatedAt: LocalDateTime
+    )
+
     private companion object {
         const val PROFILE_TEXT_MAX_LENGTH = 200
+        const val PROFILE_LIST_MAX_SIZE = 50
+        const val HEIGHT_CM_MIN = 50.0
+        const val HEIGHT_CM_MAX = 260.0
+        const val WEIGHT_KG_MIN = 10.0
+        const val WEIGHT_KG_MAX = 500.0
+        const val WAIST_CM_MIN = 30.0
+        const val WAIST_CM_MAX = 220.0
         const val SMS_CODE_LENGTH = 6
         const val TOKEN_MAX_LENGTH = 512
         const val PASSWORD_MIN_LENGTH = 6
         const val PASSWORD_MAX_LENGTH = 20
+        const val AVATAR_SIZE_PX = 1024
+        const val AVATAR_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+        const val AVATAR_CONTENT_TYPE = "image/png"
+        const val AVATAR_STORAGE_DIR = "data/avatars"
+        const val AVATAR_API_URL = "/api/v1/users/me/avatar"
         val SMS_CODE_REGEX = Regex("^\\d{6}$")
     }
 
@@ -393,9 +424,133 @@ class UserManagementService(
         }
     }
 
+    suspend fun getBasicProfile(userId: Long): UserBasicProfileResponse {
+        return DatabaseFactory.dbQuery {
+            val userEntityId = EntityID(userId, UsersTable)
+            val exists = UsersTable.selectAll().where { UsersTable.id eq userEntityId }.any()
+            if (!exists) {
+                throw AppException(
+                    code = ErrorCodes.UNAUTHORIZED,
+                    message = "User not found",
+                    status = HttpStatusCode.Unauthorized
+                )
+            }
+            val now = LocalDateTime.now(ZoneOffset.UTC)
+            ensureProfileRow(userEntityId, now)
+            buildBasicProfileResponse(userEntityId)
+        }
+    }
+
+    suspend fun upsertBasicProfile(userId: Long, request: UpsertBasicProfileRequest): UserBasicProfileResponse {
+        validateBasicProfileUpdateRequest(request)
+        return DatabaseFactory.dbQuery {
+            val userEntityId = EntityID(userId, UsersTable)
+            val exists = UsersTable.selectAll().where { UsersTable.id eq userEntityId }.any()
+            if (!exists) {
+                throw AppException(
+                    code = ErrorCodes.UNAUTHORIZED,
+                    message = "User not found",
+                    status = HttpStatusCode.Unauthorized
+                )
+            }
+            val now = LocalDateTime.now(ZoneOffset.UTC)
+            ensureProfileRow(userEntityId, now)
+            applyBasicProfileUpdate(userEntityId, request, now)
+            UsersTable.update({ UsersTable.id eq userEntityId }) {
+                it[updatedAt] = now
+            }
+            buildBasicProfileResponse(userEntityId)
+        }
+    }
+
+    suspend fun upsertAvatar(userId: Long, rawBytes: ByteArray): UserAvatarMetaResponse {
+        if (rawBytes.isEmpty()) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "Avatar file cannot be empty",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+        if (rawBytes.size > AVATAR_MAX_UPLOAD_BYTES) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "Avatar file exceeds $AVATAR_MAX_UPLOAD_BYTES bytes",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+
+        val userEntityId = EntityID(userId, UsersTable)
+        DatabaseFactory.dbQuery {
+            val exists = UsersTable.selectAll().where { UsersTable.id eq userEntityId }.any()
+            if (!exists) {
+                throw AppException(
+                    code = ErrorCodes.UNAUTHORIZED,
+                    message = "User not found",
+                    status = HttpStatusCode.Unauthorized
+                )
+            }
+        }
+
+        val pngBytes = normalizeAvatarToPng(rawBytes)
+        val now = LocalDateTime.now(ZoneOffset.UTC)
+        val fileName = avatarFileName(userId)
+        writeAvatarFile(fileName, pngBytes)
+        val sha256 = sha256Hex(pngBytes)
+
+        return DatabaseFactory.dbQuery {
+            upsertAvatarMeta(userEntityId, fileName, pngBytes.size.toLong(), sha256, now)
+            buildAvatarMetaResponse(sizeBytes = pngBytes.size.toLong(), updatedAt = now)
+        }
+    }
+
+    suspend fun getAvatarBinary(userId: Long): AvatarBinaryPayload {
+        val userEntityId = EntityID(userId, UsersTable)
+        val meta = DatabaseFactory.dbQuery {
+            val exists = UsersTable.selectAll().where { UsersTable.id eq userEntityId }.any()
+            if (!exists) {
+                throw AppException(
+                    code = ErrorCodes.UNAUTHORIZED,
+                    message = "User not found",
+                    status = HttpStatusCode.Unauthorized
+                )
+            }
+
+            val row = UserAvatarsTable.selectAll().where { UserAvatarsTable.userId eq userEntityId }.firstOrNull()
+                ?: throw AppException(
+                    code = ErrorCodes.AVATAR_NOT_FOUND,
+                    message = "Avatar not found",
+                    status = HttpStatusCode.NotFound
+                )
+            AvatarMeta(
+                fileName = row[UserAvatarsTable.fileName],
+                contentType = row[UserAvatarsTable.contentType],
+                sha256 = row[UserAvatarsTable.sha256],
+                updatedAt = row[UserAvatarsTable.updatedAt]
+            )
+        }
+
+        val filePath = avatarFilePath(meta.fileName)
+        if (!Files.exists(filePath)) {
+            throw AppException(
+                code = ErrorCodes.AVATAR_NOT_FOUND,
+                message = "Avatar not found",
+                status = HttpStatusCode.NotFound
+            )
+        }
+        val bytes = runCatching { Files.readAllBytes(filePath) }
+            .getOrElse { throw IllegalStateException("Failed to read avatar file: $filePath", it) }
+
+        return AvatarBinaryPayload(
+            bytes = bytes,
+            contentType = meta.contentType,
+            sha256 = meta.sha256,
+            updatedAt = meta.updatedAt
+        )
+    }
+
     suspend fun deleteAccountByPhoneForDebug(phone: String) {
         val normalizedPhone = normalizePhone(phone)
-        DatabaseFactory.dbQuery {
+        val avatarFileName = DatabaseFactory.dbQuery {
             val user = UsersTable.selectAll().where { UsersTable.phone eq normalizedPhone }.firstOrNull()
                 ?: throw AppException(
                     code = ErrorCodes.PHONE_NOT_REGISTERED,
@@ -403,10 +558,15 @@ class UserManagementService(
                     status = HttpStatusCode.NotFound
                 )
             val userId = user[UsersTable.id]
+            val existingAvatarFileName = UserAvatarsTable.selectAll().where { UserAvatarsTable.userId eq userId }
+                .firstOrNull()
+                ?.get(UserAvatarsTable.fileName)
             UsersTable.deleteWhere { UsersTable.id eq userId }
             SmsVerificationCodesTable.deleteWhere { SmsVerificationCodesTable.phone eq normalizedPhone }
             SmsVerificationAttemptsTable.deleteWhere { SmsVerificationAttemptsTable.phone eq normalizedPhone }
+            existingAvatarFileName
         }
+        avatarFileName?.let { deleteAvatarFileIfExists(it) }
     }
 
     private fun validatePassword(password: String) {
@@ -585,6 +745,79 @@ class UserManagementService(
         request.medicationHistory?.forEach { validateTextLength("medicationHistory item", it) }
     }
 
+    private fun validateBasicProfileUpdateRequest(request: UpsertBasicProfileRequest) {
+        validateTextLength("fullName", request.fullName)
+        parseBirthDateOrThrow(request.birthDate)
+        validateMetricRange("heightCm", request.heightCm, HEIGHT_CM_MIN, HEIGHT_CM_MAX)
+        validateMetricRange("weightKg", request.weightKg, WEIGHT_KG_MIN, WEIGHT_KG_MAX)
+        validateMetricRange("waistCm", request.waistCm, WAIST_CM_MIN, WAIST_CM_MAX)
+        request.diseaseHistory?.let { validateStringList("diseaseHistory", it) }
+    }
+
+    private fun validateMetricRange(fieldName: String, value: Double?, min: Double, max: Double) {
+        if (value == null) {
+            return
+        }
+        if (!value.isFinite()) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "$fieldName must be a finite number",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+        if (value < min || value > max) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "$fieldName must be between $min and $max",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+    }
+
+    private fun validateStringList(fieldName: String, items: List<String>) {
+        if (items.size > PROFILE_LIST_MAX_SIZE) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "$fieldName exceeds $PROFILE_LIST_MAX_SIZE items",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+        items.forEach { validateTextLength("$fieldName item", it) }
+    }
+
+    private fun parseBirthDateOrThrow(raw: String?): LocalDate? {
+        if (raw == null) {
+            return null
+        }
+        val parsed = runCatching { LocalDate.parse(raw) }.getOrElse {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "birthDate must be ISO-8601 format (yyyy-MM-dd)",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+        val today = LocalDate.now(ZoneOffset.UTC)
+        if (parsed > today) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "birthDate cannot be in the future",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+        return parsed
+    }
+
+    private fun normalizeStringList(items: List<String>): List<String> {
+        val deduped = LinkedHashSet<String>()
+        items.forEach { raw ->
+            val item = raw.trim()
+            if (item.isNotEmpty()) {
+                deduped.add(item)
+            }
+        }
+        return deduped.toList()
+    }
+
     private fun validateTextLength(fieldName: String, value: String?) {
         if (value == null) {
             return
@@ -724,6 +957,37 @@ class UserManagementService(
         }
     }
 
+    private fun Transaction.applyBasicProfileUpdate(
+        userId: EntityID<Long>,
+        request: UpsertBasicProfileRequest,
+        now: LocalDateTime
+    ) {
+        val parsedBirthDate = parseBirthDateOrThrow(request.birthDate)
+        val current = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq userId }.first()
+        UserProfilesTable.update({ UserProfilesTable.userId eq userId }) {
+            it[fullName] = request.fullName ?: current[UserProfilesTable.fullName]
+            it[gender] = request.gender ?: current[UserProfilesTable.gender]
+            it[birthDate] = parsedBirthDate ?: current[UserProfilesTable.birthDate]
+            it[heightCm] = request.heightCm?.let { cm -> BigDecimal.valueOf(cm) } ?: current[UserProfilesTable.heightCm]
+            it[weightKg] = request.weightKg?.let { kg -> BigDecimal.valueOf(kg) } ?: current[UserProfilesTable.weightKg]
+            it[waistCm] = request.waistCm?.let { cm -> BigDecimal.valueOf(cm) } ?: current[UserProfilesTable.waistCm]
+            it[updatedAt] = now
+        }
+
+        request.diseaseHistory?.let { replaceDiseaseHistory(userId, normalizeStringList(it), now) }
+    }
+
+    private fun Transaction.replaceDiseaseHistory(userId: EntityID<Long>, items: List<String>, now: LocalDateTime) {
+        UserDiseaseHistoriesTable.deleteWhere { UserDiseaseHistoriesTable.userId eq userId }
+        items.forEach { value ->
+            UserDiseaseHistoriesTable.insert {
+                it[UserDiseaseHistoriesTable.userId] = userId
+                it[item] = value
+                it[createdAt] = now
+            }
+        }
+    }
+
     private fun Transaction.buildProfileResponse(userId: EntityID<Long>, phone: String): UserProfileResponse {
         val profile = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq userId }.first()
         val familyHistory = UserFamilyHistoriesTable.selectAll().where { UserFamilyHistoriesTable.userId eq userId }
@@ -743,6 +1007,126 @@ class UserManagementService(
             familyHistory = familyHistory,
             medicalHistory = medicalHistory,
             medicationHistory = medicationHistory
+        )
+    }
+
+    private fun Transaction.buildBasicProfileResponse(userId: EntityID<Long>): UserBasicProfileResponse {
+        val profile = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq userId }.first()
+        val diseaseHistory = UserDiseaseHistoriesTable.selectAll().where { UserDiseaseHistoriesTable.userId eq userId }
+            .orderBy(UserDiseaseHistoriesTable.id, SortOrder.ASC)
+            .map { it[UserDiseaseHistoriesTable.item] }
+
+        return UserBasicProfileResponse(
+            userId = userId.value,
+            fullName = profile[UserProfilesTable.fullName],
+            gender = profile[UserProfilesTable.gender],
+            birthDate = profile[UserProfilesTable.birthDate]?.toString(),
+            heightCm = profile[UserProfilesTable.heightCm]?.toDouble(),
+            weightKg = profile[UserProfilesTable.weightKg]?.toDouble(),
+            waistCm = profile[UserProfilesTable.waistCm]?.toDouble(),
+            diseaseHistory = diseaseHistory
+        )
+    }
+
+    private data class AvatarMeta(
+        val fileName: String,
+        val contentType: String,
+        val sha256: String,
+        val updatedAt: LocalDateTime
+    )
+
+    private fun normalizeAvatarToPng(rawBytes: ByteArray): ByteArray {
+        val image = runCatching {
+            ByteArrayInputStream(rawBytes).use { input -> ImageIO.read(input) }
+        }.getOrElse {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "Avatar file is not a valid image",
+                status = HttpStatusCode.BadRequest
+            )
+        } ?: throw AppException(
+            code = ErrorCodes.INVALID_REQUEST,
+            message = "Avatar file is not a valid image",
+            status = HttpStatusCode.BadRequest
+        )
+
+        if (image.width != AVATAR_SIZE_PX || image.height != AVATAR_SIZE_PX) {
+            throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "Avatar image must be exactly ${AVATAR_SIZE_PX}x${AVATAR_SIZE_PX}",
+                status = HttpStatusCode.BadRequest
+            )
+        }
+
+        val normalized = BufferedImage(AVATAR_SIZE_PX, AVATAR_SIZE_PX, BufferedImage.TYPE_INT_ARGB)
+        val graphics = normalized.createGraphics()
+        graphics.drawImage(image, 0, 0, null)
+        graphics.dispose()
+
+        val output = ByteArrayOutputStream()
+        val written = ImageIO.write(normalized, "png", output)
+        if (!written) {
+            throw IllegalStateException("Failed to encode avatar as PNG")
+        }
+        return output.toByteArray()
+    }
+
+    private fun avatarFileName(userId: Long): String = "u_${userId}.png"
+
+    private fun avatarFilePath(fileName: String): Path = Paths.get(AVATAR_STORAGE_DIR, fileName)
+
+    private fun writeAvatarFile(fileName: String, bytes: ByteArray) {
+        val filePath = avatarFilePath(fileName)
+        runCatching {
+            Files.createDirectories(filePath.parent)
+            Files.write(filePath, bytes)
+        }.getOrElse {
+            throw IllegalStateException("Failed to persist avatar file: $filePath", it)
+        }
+    }
+
+    private fun deleteAvatarFileIfExists(fileName: String) {
+        val filePath = avatarFilePath(fileName)
+        runCatching { Files.deleteIfExists(filePath) }
+    }
+
+    private fun Transaction.upsertAvatarMeta(
+        userId: EntityID<Long>,
+        fileName: String,
+        sizeBytes: Long,
+        sha256: String,
+        now: LocalDateTime
+    ) {
+        val existing = UserAvatarsTable.selectAll().where { UserAvatarsTable.userId eq userId }.firstOrNull()
+        if (existing == null) {
+            UserAvatarsTable.insert {
+                it[UserAvatarsTable.userId] = userId
+                it[UserAvatarsTable.fileName] = fileName
+                it[UserAvatarsTable.contentType] = AVATAR_CONTENT_TYPE
+                it[UserAvatarsTable.sizeBytes] = sizeBytes
+                it[UserAvatarsTable.sha256] = sha256
+                it[UserAvatarsTable.updatedAt] = now
+            }
+            return
+        }
+
+        UserAvatarsTable.update({ UserAvatarsTable.userId eq userId }) {
+            it[UserAvatarsTable.fileName] = fileName
+            it[UserAvatarsTable.contentType] = AVATAR_CONTENT_TYPE
+            it[UserAvatarsTable.sizeBytes] = sizeBytes
+            it[UserAvatarsTable.sha256] = sha256
+            it[UserAvatarsTable.updatedAt] = now
+        }
+    }
+
+    private fun buildAvatarMetaResponse(sizeBytes: Long, updatedAt: LocalDateTime): UserAvatarMetaResponse {
+        return UserAvatarMetaResponse(
+            avatarUrl = AVATAR_API_URL,
+            contentType = AVATAR_CONTENT_TYPE,
+            width = AVATAR_SIZE_PX,
+            height = AVATAR_SIZE_PX,
+            sizeBytes = sizeBytes,
+            updatedAt = updatedAt.atOffset(ZoneOffset.UTC).toString()
         )
     }
 }

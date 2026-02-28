@@ -69,7 +69,19 @@ object UserProfilesTable : Table("user_profiles") {
     val fullName = varchar("full_name", 200).nullable()
     val gender = enumerationByName("gender", 16, Gender::class).default(Gender.UNKNOWN)
     val birthDate = date("birth_date").nullable()
+    val heightCm = decimal("height_cm", 6, 2).nullable()
     val weightKg = decimal("weight_kg", 5, 2).nullable()
+    val waistCm = decimal("waist_cm", 6, 2).nullable()
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(userId)
+}
+
+object UserAvatarsTable : Table("user_avatars") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val fileName = varchar("file_name", 255)
+    val contentType = varchar("content_type", 64)
+    val sizeBytes = long("size_bytes")
+    val sha256 = varchar("sha256", 64)
     val updatedAt = datetime("updated_at")
     override val primaryKey = PrimaryKey(userId)
 }
@@ -87,6 +99,12 @@ object UserMedicalHistoriesTable : LongIdTable("user_medical_histories") {
 }
 
 object UserMedicationHistoriesTable : LongIdTable("user_medication_histories") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val item = varchar("item", 512)
+    val createdAt = datetime("created_at")
+}
+
+object UserDiseaseHistoriesTable : LongIdTable("user_disease_histories") {
     val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
     val item = varchar("item", 512)
     val createdAt = datetime("created_at")

@@ -30,9 +30,11 @@ object DatabaseFactory {
             SchemaUtils.createMissingTablesAndColumns(
                 UsersTable,
                 UserProfilesTable,
+                UserAvatarsTable,
                 UserFamilyHistoriesTable,
                 UserMedicalHistoriesTable,
                 UserMedicationHistoriesTable,
+                UserDiseaseHistoriesTable,
                 SmsVerificationCodesTable,
                 SmsVerificationAttemptsTable,
                 UserSessionsTable,

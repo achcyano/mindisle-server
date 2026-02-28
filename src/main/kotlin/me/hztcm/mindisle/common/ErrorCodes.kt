@@ -12,6 +12,7 @@ object ErrorCodes {
 
     const val REGISTER_REQUIRED = 40401
     const val PHONE_NOT_REGISTERED = 40402
+    const val AVATAR_NOT_FOUND = 40403
 
     const val PHONE_ALREADY_REGISTERED = 40901
 
