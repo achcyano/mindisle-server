@@ -38,3 +38,4 @@ out/
 # Local environment secrets
 .env
 .kotlin/
+data/
