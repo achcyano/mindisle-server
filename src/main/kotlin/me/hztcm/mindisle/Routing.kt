@@ -8,6 +8,8 @@ import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import me.hztcm.mindisle.ai.api.registerAiRoutes
 import me.hztcm.mindisle.ai.service.AiChatService
+import me.hztcm.mindisle.medication.api.registerMedicationRoutes
+import me.hztcm.mindisle.medication.service.MedicationService
 import me.hztcm.mindisle.scale.api.registerScaleRoutes
 import me.hztcm.mindisle.scale.service.ScaleService
 import me.hztcm.mindisle.user.api.registerAuthRoutes
@@ -17,7 +19,8 @@ import me.hztcm.mindisle.user.service.UserManagementService
 fun Application.configureRouting(
     userService: UserManagementService,
     aiChatService: AiChatService,
-    scaleService: ScaleService
+    scaleService: ScaleService,
+    medicationService: MedicationService
 ) {
     routing {
         get("/") {
@@ -31,6 +34,7 @@ fun Application.configureRouting(
         route("/api/v1") {
             registerAuthRoutes(userService)
             registerUserRoutes(userService)
+            registerMedicationRoutes(medicationService)
             registerAiRoutes(aiChatService)
             registerScaleRoutes(scaleService)
         }

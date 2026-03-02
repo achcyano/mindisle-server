@@ -402,7 +402,7 @@ object ScaleSeedData {
             SeedQuestion(
                 questionKey = "q$order",
                 orderNo = order,
-                stem = stem,
+                 stem = stem,
                 type = ScaleQuestionType.YES_NO,
                 dimension = dimension,
                 reverseScored = reverseScored,

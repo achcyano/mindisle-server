@@ -35,6 +35,7 @@ object DatabaseFactory {
                 UserMedicalHistoriesTable,
                 UserMedicationHistoriesTable,
                 UserDiseaseHistoriesTable,
+                UserMedicationsTable,
                 SmsVerificationCodesTable,
                 SmsVerificationAttemptsTable,
                 UserSessionsTable,

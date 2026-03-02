@@ -1,6 +1,8 @@
 package me.hztcm.mindisle.db
 
 import me.hztcm.mindisle.model.Gender
+import me.hztcm.mindisle.model.MedicationDoseUnit
+import me.hztcm.mindisle.model.MedicationStrengthUnit
 import me.hztcm.mindisle.model.SmsPurpose
 import org.jetbrains.exposed.dao.id.LongIdTable
 import org.jetbrains.exposed.sql.ReferenceOption
@@ -108,6 +110,25 @@ object UserDiseaseHistoriesTable : LongIdTable("user_disease_histories") {
     val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
     val item = varchar("item", 512)
     val createdAt = datetime("created_at")
+}
+
+object UserMedicationsTable : LongIdTable("user_medications") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val drugName = varchar("drug_name", 200)
+    val doseTimesJson = text("dose_times_json")
+    val recordedDateLocal = date("recorded_date_local")
+    val endDateLocal = date("end_date_local")
+    val doseAmount = decimal("dose_amount", 10, 3)
+    val doseUnit = enumerationByName("dose_unit", 16, MedicationDoseUnit::class)
+    val tabletStrengthAmount = decimal("tablet_strength_amount", 10, 3).nullable()
+    val tabletStrengthUnit = enumerationByName("tablet_strength_unit", 16, MedicationStrengthUnit::class).nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        index(false, userId, endDateLocal, updatedAt)
+        index(false, userId, createdAt)
+    }
 }
 
 object SmsVerificationCodesTable : LongIdTable("sms_verification_codes") {
