@@ -21,7 +21,6 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.lessEq
 import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
@@ -49,6 +48,7 @@ class MedicationService {
                 it[doseUnit] = validated.doseUnit
                 it[tabletStrengthAmount] = validated.tabletStrengthAmount
                 it[tabletStrengthUnit] = validated.tabletStrengthUnit
+                it[deletedAt] = null
                 it[createdAt] = nowUtc
                 it[updatedAt] = nowUtc
             }[UserMedicationsTable.id]
@@ -127,10 +127,19 @@ class MedicationService {
 
     suspend fun deleteMedication(userId: Long, medicationId: Long) {
         DatabaseFactory.dbQuery {
+            val nowUtc = utcNow()
             val userEntityId = EntityID(userId, UsersTable)
             ensureUserExists(userEntityId)
-            val row = requireOwnedMedication(userEntityId, medicationId)
-            UserMedicationsTable.deleteWhere { UserMedicationsTable.id eq row[UserMedicationsTable.id] }
+            val row = requireOwnedMedication(userEntityId, medicationId, includeDeleted = true)
+            if (row[UserMedicationsTable.deletedAt] != null) {
+                return@dbQuery
+            }
+            UserMedicationsTable.update({
+                (UserMedicationsTable.id eq row[UserMedicationsTable.id]) and UserMedicationsTable.deletedAt.isNull()
+            }) {
+                it[deletedAt] = nowUtc
+                it[updatedAt] = nowUtc
+            }
         }
     }
 
@@ -146,7 +155,9 @@ class MedicationService {
             } else {
                 UserMedicationsTable.id greater 0L
             }
-            var condition = (UserMedicationsTable.userId eq userId) and cursorCondition
+            var condition = (UserMedicationsTable.userId eq userId) and
+                UserMedicationsTable.deletedAt.isNull() and
+                cursorCondition
             if (onlyActive) {
                 condition = condition and
                     (UserMedicationsTable.recordedDateLocal lessEq todayPlus8) and
@@ -156,12 +167,19 @@ class MedicationService {
         }
     }
 
-    private fun requireOwnedMedication(userId: EntityID<Long>, medicationId: Long): ResultRow {
+    private fun requireOwnedMedication(
+        userId: EntityID<Long>,
+        medicationId: Long,
+        includeDeleted: Boolean = false
+    ): ResultRow {
         val ref = EntityID(medicationId, UserMedicationsTable)
         val row = UserMedicationsTable.selectAll().where {
             UserMedicationsTable.id eq ref
         }.firstOrNull() ?: throw medicationNotFound()
         if (row[UserMedicationsTable.userId].value != userId.value) {
+            throw medicationNotFound()
+        }
+        if (!includeDeleted && row[UserMedicationsTable.deletedAt] != null) {
             throw medicationNotFound()
         }
         return row

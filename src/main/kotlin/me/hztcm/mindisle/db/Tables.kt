@@ -122,12 +122,14 @@ object UserMedicationsTable : LongIdTable("user_medications") {
     val doseUnit = enumerationByName("dose_unit", 16, MedicationDoseUnit::class)
     val tabletStrengthAmount = decimal("tablet_strength_amount", 10, 3).nullable()
     val tabletStrengthUnit = enumerationByName("tablet_strength_unit", 16, MedicationStrengthUnit::class).nullable()
+    val deletedAt = datetime("deleted_at").nullable()
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")
 
     init {
         index(false, userId, endDateLocal, updatedAt)
         index(false, userId, createdAt)
+        index(false, userId, deletedAt, updatedAt)
     }
 }
 
