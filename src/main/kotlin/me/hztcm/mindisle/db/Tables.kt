@@ -74,6 +74,16 @@ object UserProfilesTable : Table("user_profiles") {
     val heightCm = decimal("height_cm", 6, 2).nullable()
     val weightKg = decimal("weight_kg", 5, 2).nullable()
     val waistCm = decimal("waist_cm", 6, 2).nullable()
+    val usesTcm = bool("uses_tcm").default(false)
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(userId)
+}
+
+object UserDoctorBindingsTable : Table("user_doctor_bindings") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val isBound = bool("is_bound").default(false)
+    val boundAt = datetime("bound_at").nullable()
+    val unboundAt = datetime("unbound_at").nullable()
     val updatedAt = datetime("updated_at")
     override val primaryKey = PrimaryKey(userId)
 }

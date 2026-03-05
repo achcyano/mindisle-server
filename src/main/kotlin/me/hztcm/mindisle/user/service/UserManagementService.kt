@@ -971,6 +971,7 @@ class UserManagementService(
             it[heightCm] = request.heightCm?.let { cm -> BigDecimal.valueOf(cm) } ?: current[UserProfilesTable.heightCm]
             it[weightKg] = request.weightKg?.let { kg -> BigDecimal.valueOf(kg) } ?: current[UserProfilesTable.weightKg]
             it[waistCm] = request.waistCm?.let { cm -> BigDecimal.valueOf(cm) } ?: current[UserProfilesTable.waistCm]
+            it[usesTcm] = request.usesTcm ?: current[UserProfilesTable.usesTcm]
             it[updatedAt] = now
         }
 
@@ -1024,6 +1025,7 @@ class UserManagementService(
             heightCm = profile[UserProfilesTable.heightCm]?.toDouble(),
             weightKg = profile[UserProfilesTable.weightKg]?.toDouble(),
             waistCm = profile[UserProfilesTable.waistCm]?.toDouble(),
+            usesTcm = profile[UserProfilesTable.usesTcm],
             diseaseHistory = diseaseHistory
         )
     }

@@ -21,6 +21,7 @@ data class UpsertBasicProfileRequest(
     val heightCm: Double? = null,
     val weightKg: Double? = null,
     val waistCm: Double? = null,
+    val usesTcm: Boolean? = null,
     val diseaseHistory: List<String>? = null
 )
 
@@ -46,6 +47,7 @@ data class UserBasicProfileResponse(
     val heightCm: Double? = null,
     val weightKg: Double? = null,
     val waistCm: Double? = null,
+    val usesTcm: Boolean = false,
     val diseaseHistory: List<String> = emptyList()
 )
 
