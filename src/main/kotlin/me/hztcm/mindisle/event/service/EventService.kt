@@ -7,6 +7,8 @@ import kotlinx.serialization.json.put
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
 import me.hztcm.mindisle.db.DatabaseFactory
+import me.hztcm.mindisle.db.DoctorPatientBindingStatus
+import me.hztcm.mindisle.db.DoctorPatientBindingsTable
 import me.hztcm.mindisle.db.ScaleSessionStatus
 import me.hztcm.mindisle.db.ScaleStatus
 import me.hztcm.mindisle.db.ScaleVersionsTable
@@ -14,8 +16,6 @@ import me.hztcm.mindisle.db.ScalesTable
 import me.hztcm.mindisle.db.UserMedicationsTable
 import me.hztcm.mindisle.db.UserScaleSessionsTable
 import me.hztcm.mindisle.db.UsersTable
-import me.hztcm.mindisle.model.DoctorBindingStatusResponse
-import me.hztcm.mindisle.model.UpsertDoctorBindingRequest
 import me.hztcm.mindisle.model.UserEventItem
 import me.hztcm.mindisle.model.UserEventListResponse
 import org.jetbrains.exposed.dao.id.EntityID
@@ -55,7 +55,7 @@ class EventService {
             val drafts = mutableListOf<EventDraft>()
             appendScaleRedoEvents(userRef, userCreatedAt, now, drafts)
             appendInProgressScaleEvents(userRef, drafts)
-            appendDoctorBindingEvent(userCreatedAt, drafts)
+            appendDoctorBindingEvent(userRef, userCreatedAt, drafts)
             appendMedicationPlanEmptyEvent(userRef, userCreatedAt, drafts)
             appendMonthlyProfileUpdateEvent(userCreatedAt, now, drafts)
 
@@ -73,31 +73,6 @@ class EventService {
             UserEventListResponse(
                 generatedAt = now.toIsoOffsetPlus8(),
                 items = items
-            )
-        }
-    }
-
-    suspend fun getDoctorBinding(userId: Long): DoctorBindingStatusResponse {
-        return DatabaseFactory.dbQuery {
-            val userRef = EntityID(userId, UsersTable)
-            val user = requireUser(userRef)
-            // TODO: 接入真实医生绑定关系后，改为读取真实绑定状态。
-            DoctorBindingStatusResponse(
-                isBound = false,
-                updatedAt = user[UsersTable.createdAt].toIsoInstant()
-            )
-        }
-    }
-
-    suspend fun upsertDoctorBinding(userId: Long, request: UpsertDoctorBindingRequest): DoctorBindingStatusResponse {
-        return DatabaseFactory.dbQuery {
-            val userRef = EntityID(userId, UsersTable)
-            val user = requireUser(userRef)
-            request.isBound
-            // TODO: 接入真实医生绑定关系后，允许状态更新并持久化。
-            DoctorBindingStatusResponse(
-                isBound = false,
-                updatedAt = user[UsersTable.createdAt].toIsoInstant()
             )
         }
     }
@@ -201,16 +176,23 @@ class EventService {
     }
 
     private fun org.jetbrains.exposed.sql.Transaction.appendDoctorBindingEvent(
+        userId: EntityID<Long>,
         userCreatedAt: LocalDateTime,
         output: MutableList<EventDraft>
     ) {
-        // TODO: 接入真实医生绑定关系后，仅在未绑定时返回。
-        output += EventDraft(
-            eventName = EVENT_DOCTOR_BIND_REQUIRED,
-            eventType = EVENT_TYPE_BIND_DOCTOR,
-            dueAt = userCreatedAt,
-            payload = buildJsonObject { }
-        )
+        val hasActiveBinding = DoctorPatientBindingsTable.selectAll().where {
+            (DoctorPatientBindingsTable.patientUserId eq userId) and
+                (DoctorPatientBindingsTable.status eq DoctorPatientBindingStatus.ACTIVE) and
+                DoctorPatientBindingsTable.unboundAt.isNull()
+        }.any()
+        if (!hasActiveBinding) {
+            output += EventDraft(
+                eventName = EVENT_DOCTOR_BIND_REQUIRED,
+                eventType = EVENT_TYPE_BIND_DOCTOR,
+                dueAt = userCreatedAt,
+                payload = buildJsonObject {}
+            )
+        }
     }
 
     private fun org.jetbrains.exposed.sql.Transaction.appendMedicationPlanEmptyEvent(
@@ -260,7 +242,6 @@ class EventService {
                 status = HttpStatusCode.Unauthorized
             )
     }
-
 }
 
 private data class EventDraft(

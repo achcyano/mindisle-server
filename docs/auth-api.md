@@ -805,3 +805,18 @@ This is a test endpoint.
 
 建议客户端将以上 TTL 与限制设计为“服务端可变参数”，不要硬编码固定值。
 
+
+---
+
+## 2026-03 医生绑定接口更新（新增）
+
+为避免与事件接口耦合，医生绑定相关能力已迁移到独立接口（详见 `docs/doctor-api.md`）：
+
+- `GET /api/v1/users/me/doctor-binding`
+- `POST /api/v1/users/me/doctor-binding/bind`
+- `POST /api/v1/users/me/doctor-binding/unbind`
+- `GET /api/v1/users/me/doctor-binding/history`
+
+说明：
+- 现已接入真实医患绑定关系（单活跃绑定 + 历史保留）。
+- 事件接口中的“固定未绑定 TODO”已取消，改为真实绑定状态判定。

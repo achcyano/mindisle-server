@@ -7,7 +7,10 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import me.hztcm.mindisle.ai.api.registerAiRoutes
+import me.hztcm.mindisle.doctor.api.registerDoctorAuthRoutes
+import me.hztcm.mindisle.doctor.api.registerDoctorRoutes
 import me.hztcm.mindisle.ai.service.AiChatService
+import me.hztcm.mindisle.doctor.service.DoctorService
 import me.hztcm.mindisle.event.api.registerEventRoutes
 import me.hztcm.mindisle.event.service.EventService
 import me.hztcm.mindisle.medication.api.registerMedicationRoutes
@@ -23,6 +26,7 @@ fun Application.configureRouting(
     aiChatService: AiChatService,
     scaleService: ScaleService,
     medicationService: MedicationService,
+    doctorService: DoctorService,
     eventService: EventService
 ) {
     routing {
@@ -40,6 +44,8 @@ fun Application.configureRouting(
             registerMedicationRoutes(medicationService)
             registerAiRoutes(aiChatService)
             registerScaleRoutes(scaleService)
+            registerDoctorAuthRoutes(doctorService)
+            registerDoctorRoutes(doctorService)
             registerEventRoutes(eventService)
         }
     }

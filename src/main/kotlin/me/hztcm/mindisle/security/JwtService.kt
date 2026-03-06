@@ -24,7 +24,23 @@ class JwtService(private val config: AuthConfig) {
             .withAudience(config.jwtAudience)
             .withIssuedAt(Date.from(now))
             .withExpiresAt(Date.from(expiresAt))
+            .withClaim("actor", "user")
             .withClaim("uid", userId)
+            .withClaim("did", deviceId)
+            .sign(algorithm)
+        return token to config.accessTokenTtlSeconds
+    }
+
+    fun generateDoctorAccessToken(doctorId: Long, deviceId: String): Pair<String, Long> {
+        val now = Instant.now()
+        val expiresAt = now.plusSeconds(config.accessTokenTtlSeconds)
+        val token = JWT.create()
+            .withIssuer(config.jwtIssuer)
+            .withAudience(config.jwtAudience)
+            .withIssuedAt(Date.from(now))
+            .withExpiresAt(Date.from(expiresAt))
+            .withClaim("actor", "doctor")
+            .withClaim("doctor_id", doctorId)
             .withClaim("did", deviceId)
             .sign(algorithm)
         return token to config.accessTokenTtlSeconds

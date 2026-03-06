@@ -17,6 +17,7 @@ import me.hztcm.mindisle.db.UserMedicalHistoriesTable
 import me.hztcm.mindisle.db.UserMedicationHistoriesTable
 import me.hztcm.mindisle.db.UserProfilesTable
 import me.hztcm.mindisle.db.UserSessionsTable
+import me.hztcm.mindisle.db.UserWeightLogsTable
 import me.hztcm.mindisle.db.UsersTable
 import me.hztcm.mindisle.model.AuthResponse
 import me.hztcm.mindisle.model.DirectLoginRequest
@@ -103,6 +104,11 @@ class UserManagementService(
         val smsTtlSeconds = when (request.purpose) {
             SmsPurpose.REGISTER -> config.smsCodeTtlSeconds + config.registerSmsCodeGraceSeconds
             SmsPurpose.RESET_PASSWORD -> config.smsCodeTtlSeconds
+            SmsPurpose.DOCTOR_REGISTER, SmsPurpose.DOCTOR_RESET_PASSWORD -> throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "Unsupported sms purpose in user auth flow",
+                status = HttpStatusCode.BadRequest
+            )
         }
         DatabaseFactory.dbQuery {
             validateSmsBusinessRules(phone, request.purpose, now)
@@ -624,6 +630,12 @@ class UserManagementService(
                     )
                 }
             }
+
+            SmsPurpose.DOCTOR_REGISTER, SmsPurpose.DOCTOR_RESET_PASSWORD -> throw AppException(
+                code = ErrorCodes.INVALID_REQUEST,
+                message = "Unsupported sms purpose in user auth flow",
+                status = HttpStatusCode.BadRequest
+            )
         }
 
         val latest = SmsVerificationCodesTable.selectAll().where {
@@ -911,13 +923,16 @@ class UserManagementService(
         }
 
         val current = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq userId }.first()
+        val oldWeight = current[UserProfilesTable.weightKg]
+        val newWeight = request.weightKg?.let { kg -> BigDecimal.valueOf(kg) } ?: oldWeight
         UserProfilesTable.update({ UserProfilesTable.userId eq userId }) {
             it[fullName] = request.fullName ?: current[UserProfilesTable.fullName]
             it[gender] = request.gender ?: current[UserProfilesTable.gender]
             it[birthDate] = parsedBirthDate ?: current[UserProfilesTable.birthDate]
-            it[weightKg] = request.weightKg?.let { kg -> BigDecimal.valueOf(kg) } ?: current[UserProfilesTable.weightKg]
+            it[weightKg] = newWeight
             it[updatedAt] = now
         }
+        recordWeightLogIfChanged(userId, oldWeight, newWeight, now, source = "PROFILE_UPDATE")
 
         request.familyHistory?.let { replaceFamilyHistory(userId, it, now) }
         request.medicalHistory?.let { replaceMedicalHistory(userId, it, now) }
@@ -964,18 +979,43 @@ class UserManagementService(
     ) {
         val parsedBirthDate = parseBirthDateOrThrow(request.birthDate)
         val current = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq userId }.first()
+        val oldWeight = current[UserProfilesTable.weightKg]
+        val newWeight = request.weightKg?.let { kg -> BigDecimal.valueOf(kg) } ?: oldWeight
         UserProfilesTable.update({ UserProfilesTable.userId eq userId }) {
             it[fullName] = request.fullName ?: current[UserProfilesTable.fullName]
             it[gender] = request.gender ?: current[UserProfilesTable.gender]
             it[birthDate] = parsedBirthDate ?: current[UserProfilesTable.birthDate]
             it[heightCm] = request.heightCm?.let { cm -> BigDecimal.valueOf(cm) } ?: current[UserProfilesTable.heightCm]
-            it[weightKg] = request.weightKg?.let { kg -> BigDecimal.valueOf(kg) } ?: current[UserProfilesTable.weightKg]
+            it[weightKg] = newWeight
             it[waistCm] = request.waistCm?.let { cm -> BigDecimal.valueOf(cm) } ?: current[UserProfilesTable.waistCm]
             it[usesTcm] = request.usesTcm ?: current[UserProfilesTable.usesTcm]
             it[updatedAt] = now
         }
+        recordWeightLogIfChanged(userId, oldWeight, newWeight, now, source = "BASIC_PROFILE_UPDATE")
 
         request.diseaseHistory?.let { replaceDiseaseHistory(userId, normalizeStringList(it), now) }
+    }
+
+    private fun Transaction.recordWeightLogIfChanged(
+        userId: EntityID<Long>,
+        oldWeight: BigDecimal?,
+        newWeight: BigDecimal?,
+        now: LocalDateTime,
+        source: String
+    ) {
+        if (newWeight == null) {
+            return
+        }
+        if (oldWeight != null && oldWeight.compareTo(newWeight) == 0) {
+            return
+        }
+        UserWeightLogsTable.insert {
+            it[UserWeightLogsTable.userId] = userId
+            it[weightKg] = newWeight
+            it[recordedAt] = now
+            it[UserWeightLogsTable.sourceType] = source
+            it[createdAt] = now
+        }
     }
 
     private fun Transaction.replaceDiseaseHistory(userId: EntityID<Long>, items: List<String>, now: LocalDateTime) {

@@ -12,6 +12,7 @@ import me.hztcm.mindisle.ai.service.AiChatService
 import me.hztcm.mindisle.common.configureStatusPages
 import me.hztcm.mindisle.config.AppConfig
 import me.hztcm.mindisle.db.DatabaseFactory
+import me.hztcm.mindisle.doctor.service.DoctorService
 import me.hztcm.mindisle.event.service.EventService
 import me.hztcm.mindisle.medication.service.MedicationService
 import me.hztcm.mindisle.scale.service.ScaleService
@@ -51,11 +52,12 @@ fun Application.module() {
     val aiChatService = AiChatService(AppConfig.llm, deepSeekClient)
     val scaleService = ScaleService(AppConfig.llm, deepSeekClient, AppConfig.scale)
     val medicationService = MedicationService()
+    val doctorService = DoctorService(AppConfig.auth, AppConfig.llm, jwtService, smsGateway, deepSeekClient)
     val eventService = EventService()
 
     configureStatusPages()
     configureAuth(jwtService)
-    configureRouting(userService, aiChatService, scaleService, medicationService, eventService)
+    configureRouting(userService, aiChatService, scaleService, medicationService, doctorService, eventService)
 
     monitor.subscribe(ApplicationStopping) {
         runCatching { aiChatService.close() }

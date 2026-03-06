@@ -11,7 +11,7 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
 
-internal data class ValidatedMedicationPayload(
+data class ValidatedMedicationPayload(
     val drugName: String,
     val doseTimes: List<String>,
     val endDate: LocalDate,
@@ -21,7 +21,7 @@ internal data class ValidatedMedicationPayload(
     val tabletStrengthUnit: MedicationStrengthUnit?
 )
 
-internal object MedicationValidators {
+object MedicationValidators {
     private const val DRUG_NAME_MAX_LENGTH = 200
     private const val DOSE_TIMES_MAX_SIZE = 16
     private const val DECIMAL_SCALE = 3

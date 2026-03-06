@@ -14,6 +14,11 @@ data class UserPrincipal(
     val deviceId: String?
 )
 
+data class DoctorPrincipal(
+    val doctorId: Long,
+    val deviceId: String?
+)
+
 fun Application.configureAuth(jwtService: JwtService) {
     install(Authentication) {
         jwt("auth-jwt") {
@@ -21,8 +26,32 @@ fun Application.configureAuth(jwtService: JwtService) {
             validate { credential ->
                 val userId = credential.payload.getClaim("uid").asLong()
                 val deviceId = credential.payload.getClaim("did").asString()
-                if (userId != null) {
+                val actor = credential.payload.getClaim("actor").asString()
+                if (userId != null && (actor == null || actor == "user")) {
                     UserPrincipal(userId = userId, deviceId = deviceId)
+                } else {
+                    null
+                }
+            }
+            challenge { _, _ ->
+                call.respond(
+                    HttpStatusCode.Unauthorized,
+                    ApiResponse<Unit>(
+                        code = ErrorCodes.UNAUTHORIZED,
+                        message = "Unauthorized"
+                    )
+                )
+            }
+        }
+
+        jwt("doctor-auth-jwt") {
+            verifier(jwtService.verifier)
+            validate { credential ->
+                val doctorId = credential.payload.getClaim("doctor_id").asLong()
+                val deviceId = credential.payload.getClaim("did").asString()
+                val actor = credential.payload.getClaim("actor").asString()
+                if (doctorId != null && actor == "doctor") {
+                    DoctorPrincipal(doctorId = doctorId, deviceId = deviceId)
                 } else {
                     null
                 }

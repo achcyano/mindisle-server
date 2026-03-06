@@ -5,7 +5,9 @@ import kotlinx.serialization.Serializable
 @Serializable
 enum class SmsPurpose {
     REGISTER,
-    RESET_PASSWORD
+    RESET_PASSWORD,
+    DOCTOR_REGISTER,
+    DOCTOR_RESET_PASSWORD
 }
 
 @Serializable

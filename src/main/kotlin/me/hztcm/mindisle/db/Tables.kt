@@ -58,6 +58,11 @@ enum class ScaleSessionStatus {
     ABANDONED
 }
 
+enum class DoctorPatientBindingStatus {
+    ACTIVE,
+    UNBOUND
+}
+
 object UsersTable : LongIdTable("users") {
     val phone = varchar("phone", 20).uniqueIndex()
     val passwordHash = varchar("password_hash", 255)
@@ -77,6 +82,86 @@ object UserProfilesTable : Table("user_profiles") {
     val usesTcm = bool("uses_tcm").default(false)
     val updatedAt = datetime("updated_at")
     override val primaryKey = PrimaryKey(userId)
+}
+
+object DoctorsTable : LongIdTable("doctors") {
+    val phone = varchar("phone", 20).uniqueIndex()
+    val fullName = varchar("full_name", 200)
+    val title = varchar("title", 100).nullable()
+    val hospital = varchar("hospital", 200).nullable()
+    val passwordHash = varchar("password_hash", 255)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+    val lastLoginAt = datetime("last_login_at").nullable()
+}
+
+object DoctorSessionsTable : LongIdTable("doctor_sessions") {
+    val doctorId = reference("doctor_id", DoctorsTable, onDelete = ReferenceOption.CASCADE)
+    val deviceId = varchar("device_id", 128)
+    val refreshTokenHash = varchar("refresh_token_hash", 64).uniqueIndex()
+    val status = enumerationByName("status", 16, SessionStatus::class)
+    val createdAt = datetime("created_at")
+    val lastUsedAt = datetime("last_used_at")
+    val expiresAt = datetime("expires_at")
+    val revokedAt = datetime("revoked_at").nullable()
+
+    init {
+        uniqueIndex(doctorId, deviceId)
+        index(false, doctorId, deviceId, status)
+    }
+}
+
+object DoctorThresholdSettingsTable : Table("doctor_threshold_settings") {
+    val doctorId = reference("doctor_id", DoctorsTable, onDelete = ReferenceOption.CASCADE)
+    val scl90Threshold = decimal("scl90_threshold", 10, 2).nullable()
+    val phq9Threshold = decimal("phq9_threshold", 10, 2).nullable()
+    val gad7Threshold = decimal("gad7_threshold", 10, 2).nullable()
+    val psqiThreshold = decimal("psqi_threshold", 10, 2).nullable()
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(doctorId)
+}
+
+object DoctorBindingCodesTable : LongIdTable("doctor_binding_codes") {
+    val doctorId = reference("doctor_id", DoctorsTable, onDelete = ReferenceOption.CASCADE)
+    val codeHash = varchar("code_hash", 64)
+    val expiresAt = datetime("expires_at")
+    val consumedAt = datetime("consumed_at").nullable()
+    val createdAt = datetime("created_at")
+    val qrPayload = varchar("qr_payload", 255)
+
+    init {
+        index(false, doctorId, createdAt)
+        index(false, codeHash, expiresAt, consumedAt)
+    }
+}
+
+object DoctorPatientBindingsTable : LongIdTable("doctor_patient_bindings") {
+    val patientUserId = reference("patient_user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val doctorId = reference("doctor_id", DoctorsTable, onDelete = ReferenceOption.CASCADE)
+    val status = enumerationByName("status", 16, DoctorPatientBindingStatus::class)
+    val severityGroup = varchar("severity_group", 64).nullable()
+    val treatmentPhase = varchar("treatment_phase", 64).nullable()
+    val boundAt = datetime("bound_at")
+    val unboundAt = datetime("unbound_at").nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        index(false, patientUserId, status, updatedAt)
+        index(false, doctorId, status, updatedAt)
+    }
+}
+
+object DoctorPatientGroupChangesTable : LongIdTable("doctor_patient_group_changes") {
+    val bindingId = reference("binding_id", DoctorPatientBindingsTable, onDelete = ReferenceOption.CASCADE)
+    val fieldName = varchar("field_name", 32)
+    val oldValue = varchar("old_value", 64).nullable()
+    val newValue = varchar("new_value", 64).nullable()
+    val changedAt = datetime("changed_at")
+
+    init {
+        index(false, bindingId, changedAt)
+    }
 }
 
 object UserDoctorBindingsTable : Table("user_doctor_bindings") {
@@ -140,6 +225,31 @@ object UserMedicationsTable : LongIdTable("user_medications") {
         index(false, userId, endDateLocal, updatedAt)
         index(false, userId, createdAt)
         index(false, userId, deletedAt, updatedAt)
+    }
+}
+
+object UserSideEffectsTable : LongIdTable("user_side_effects") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val symptom = varchar("symptom", 200)
+    val severity = integer("severity")
+    val note = varchar("note", 1000).nullable()
+    val recordedAt = datetime("recorded_at")
+    val createdAt = datetime("created_at")
+
+    init {
+        index(false, userId, recordedAt)
+    }
+}
+
+object UserWeightLogsTable : LongIdTable("user_weight_logs") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val weightKg = decimal("weight_kg", 5, 2)
+    val recordedAt = datetime("recorded_at")
+    val sourceType = varchar("source", 32)
+    val createdAt = datetime("created_at")
+
+    init {
+        index(false, userId, recordedAt)
     }
 }
 
