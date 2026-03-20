@@ -19,8 +19,7 @@ data class DoctorRegisterRequest(
     val phone: String,
     val smsCode: String,
     val password: String,
-    val fullName: String,
-    val title: String? = null,
+    val fullName: String? = null,
     val hospital: String? = null
 )
 
@@ -72,7 +71,12 @@ data class DoctorProfileResponse(
     val doctorId: Long,
     val phone: String,
     val fullName: String,
-    val title: String? = null,
+    val hospital: String? = null
+)
+
+@Serializable
+data class UpsertDoctorProfileRequest(
+    val fullName: String? = null,
     val hospital: String? = null
 )
 
@@ -96,8 +100,7 @@ data class DoctorThresholdSettingsResponse(
 @Serializable
 data class GenerateBindingCodeResponse(
     val code: String,
-    val expiresAt: String,
-    val qrPayload: String
+    val expiresAt: String
 )
 
 @Serializable
@@ -110,11 +113,9 @@ data class DoctorBindingInfoResponse(
     val bindingId: Long,
     val doctorId: Long,
     val doctorName: String,
-    val doctorTitle: String? = null,
     val doctorHospital: String? = null,
     val boundAt: String,
-    val severityGroup: String? = null,
-    val treatmentPhase: String? = null
+    val severityGroup: String? = null
 )
 
 @Serializable
@@ -129,13 +130,11 @@ data class BindingHistoryItem(
     val bindingId: Long,
     val doctorId: Long,
     val doctorName: String,
-    val doctorTitle: String? = null,
     val doctorHospital: String? = null,
     val status: String,
     val boundAt: String,
     val unboundAt: String? = null,
-    val severityGroup: String? = null,
-    val treatmentPhase: String? = null
+    val severityGroup: String? = null
 )
 
 @Serializable
@@ -153,8 +152,7 @@ data class DoctorPatientBindingHistoryItem(
     val status: String,
     val boundAt: String,
     val unboundAt: String? = null,
-    val severityGroup: String? = null,
-    val treatmentPhase: String? = null
+    val severityGroup: String? = null
 )
 
 @Serializable
@@ -163,17 +161,51 @@ data class DoctorBindingHistoryResponse(
     val nextCursor: String? = null
 )
 
+enum class DoctorPatientSortBy {
+    LATEST_ASSESSMENT_AT,
+    SCL90_SCORE
+}
+
+enum class DoctorPatientSortOrder {
+    ASC,
+    DESC
+}
+
+data class ListDoctorPatientsQuery(
+    val limit: Int,
+    val cursor: String?,
+    val keyword: String?,
+    val gender: Gender?,
+    val severityGroup: String?,
+    val abnormalOnly: Boolean,
+    val scl90ScoreMin: Double?,
+    val scl90ScoreMax: Double?,
+    val sortBy: DoctorPatientSortBy,
+    val sortOrder: DoctorPatientSortOrder
+)
+
 @Serializable
 data class UpdatePatientGroupingRequest(
     val severityGroup: String? = null,
-    val treatmentPhase: String? = null
+    val reason: String? = null
 )
 
 @Serializable
 data class DoctorPatientGroupingStateResponse(
     val patientUserId: Long,
     val severityGroup: String? = null,
-    val treatmentPhase: String? = null,
+    val updatedAt: String
+)
+
+@Serializable
+data class UpdatePatientDiagnosisRequest(
+    val diagnosis: String? = null
+)
+
+@Serializable
+data class DoctorPatientDiagnosisStateResponse(
+    val patientUserId: Long,
+    val diagnosis: String? = null,
     val updatedAt: String
 )
 
@@ -183,6 +215,9 @@ data class GroupingChangeItem(
     val fieldName: String,
     val oldValue: String? = null,
     val newValue: String? = null,
+    val operatorDoctorId: Long,
+    val operatorDoctorName: String,
+    val reason: String? = null,
     val changedAt: String
 )
 
@@ -206,8 +241,13 @@ data class DoctorPatientItem(
     val patientUserId: Long,
     val phone: String,
     val fullName: String? = null,
+    val gender: Gender = Gender.UNKNOWN,
+    val birthDate: String? = null,
+    val age: Int? = null,
     val severityGroup: String? = null,
-    val treatmentPhase: String? = null,
+    val diagnosis: String? = null,
+    val latestScl90Score: Double? = null,
+    val latestAssessmentAt: String? = null,
     val lastScaleSubmittedAt: String? = null,
     val metrics: PatientMetricSnapshot,
     val abnormal: Boolean,
@@ -246,12 +286,30 @@ data class GenerateAssessmentReportRequest(
 
 @Serializable
 data class AssessmentReportResponse(
+    val reportId: Long,
+    val days: Int,
     val patientUserId: Long,
     val generatedAt: String,
     val polished: Boolean,
     val model: String? = null,
     val templateReport: String,
     val report: String
+)
+
+@Serializable
+data class AssessmentReportSummaryItem(
+    val reportId: Long,
+    val days: Int,
+    val patientUserId: Long,
+    val generatedAt: String,
+    val polished: Boolean,
+    val model: String? = null
+)
+
+@Serializable
+data class AssessmentReportListResponse(
+    val items: List<AssessmentReportSummaryItem>,
+    val nextCursor: String? = null
 )
 
 @Serializable

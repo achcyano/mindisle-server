@@ -87,7 +87,6 @@ object UserProfilesTable : Table("user_profiles") {
 object DoctorsTable : LongIdTable("doctors") {
     val phone = varchar("phone", 20).uniqueIndex()
     val fullName = varchar("full_name", 200)
-    val title = varchar("title", 100).nullable()
     val hospital = varchar("hospital", 200).nullable()
     val passwordHash = varchar("password_hash", 255)
     val createdAt = datetime("created_at")
@@ -108,6 +107,20 @@ object DoctorSessionsTable : LongIdTable("doctor_sessions") {
     init {
         uniqueIndex(doctorId, deviceId)
         index(false, doctorId, deviceId, status)
+    }
+}
+
+object DoctorLoginTicketsTable : LongIdTable("doctor_login_tickets") {
+    val doctorId = reference("doctor_id", DoctorsTable, onDelete = ReferenceOption.CASCADE)
+    val phone = varchar("phone", 20)
+    val deviceId = varchar("device_id", 128)
+    val ticketHash = varchar("ticket_hash", 64).uniqueIndex()
+    val createdAt = datetime("created_at")
+    val expiresAt = datetime("expires_at")
+    val consumedAt = datetime("consumed_at").nullable()
+
+    init {
+        index(false, doctorId, deviceId, expiresAt)
     }
 }
 
@@ -140,6 +153,7 @@ object DoctorPatientBindingsTable : LongIdTable("doctor_patient_bindings") {
     val doctorId = reference("doctor_id", DoctorsTable, onDelete = ReferenceOption.CASCADE)
     val status = enumerationByName("status", 16, DoctorPatientBindingStatus::class)
     val severityGroup = varchar("severity_group", 64).nullable()
+    val diagnosis = varchar("diagnosis", 512).nullable()
     val treatmentPhase = varchar("treatment_phase", 64).nullable()
     val boundAt = datetime("bound_at")
     val unboundAt = datetime("unbound_at").nullable()
@@ -157,10 +171,30 @@ object DoctorPatientGroupChangesTable : LongIdTable("doctor_patient_group_change
     val fieldName = varchar("field_name", 32)
     val oldValue = varchar("old_value", 64).nullable()
     val newValue = varchar("new_value", 64).nullable()
+    val changedByDoctorId = optReference("changed_by_doctor_id", DoctorsTable, onDelete = ReferenceOption.SET_NULL)
+    val reason = varchar("reason", 512).nullable()
     val changedAt = datetime("changed_at")
 
     init {
         index(false, bindingId, changedAt)
+        index(false, changedByDoctorId, changedAt)
+    }
+}
+
+object DoctorPatientAssessmentReportsTable : LongIdTable("doctor_patient_assessment_reports") {
+    val doctorId = reference("doctor_id", DoctorsTable, onDelete = ReferenceOption.CASCADE)
+    val patientUserId = reference("patient_user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val templateReport = text("template_report")
+    val report = text("report")
+    val polished = bool("polished").default(false)
+    val model = varchar("model", 128).nullable()
+    val days = integer("days")
+    val generatedAt = datetime("generated_at")
+    val createdAt = datetime("created_at")
+
+    init {
+        index(false, doctorId, patientUserId, generatedAt)
+        index(false, patientUserId, generatedAt)
     }
 }
 

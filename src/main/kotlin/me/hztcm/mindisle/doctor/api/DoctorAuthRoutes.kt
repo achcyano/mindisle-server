@@ -8,16 +8,19 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
+import me.hztcm.mindisle.auth.requireDeviceIdHeader
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
 import me.hztcm.mindisle.doctor.service.DoctorService
 import me.hztcm.mindisle.model.ApiResponse
+import me.hztcm.mindisle.model.DirectLoginRequest
 import me.hztcm.mindisle.model.DoctorChangePasswordRequest
 import me.hztcm.mindisle.model.DoctorLogoutRequest
 import me.hztcm.mindisle.model.DoctorPasswordLoginRequest
 import me.hztcm.mindisle.model.DoctorRegisterRequest
 import me.hztcm.mindisle.model.DoctorResetPasswordRequest
 import me.hztcm.mindisle.model.DoctorTokenRefreshRequest
+import me.hztcm.mindisle.model.LoginCheckRequest
 import me.hztcm.mindisle.model.SendDoctorSmsCodeRequest
 import me.hztcm.mindisle.security.DoctorPrincipal
 
@@ -34,21 +37,35 @@ fun Route.registerDoctorAuthRoutes(service: DoctorService) {
 
         post("/register") {
             val request = call.receive<DoctorRegisterRequest>()
-            val deviceId = call.requireDeviceId(service)
+            val deviceId = call.requireDeviceId()
             val data = service.register(request, deviceId)
             call.respond(HttpStatusCode.Created, ApiResponse(data = data))
         }
 
+        post("/login/check") {
+            val request = call.receive<LoginCheckRequest>()
+            val deviceId = call.requireDeviceId()
+            val data = service.loginCheck(request, deviceId)
+            call.respond(ApiResponse(data = data))
+        }
+
+        post("/login/direct") {
+            val request = call.receive<DirectLoginRequest>()
+            val deviceId = call.requireDeviceId()
+            val data = service.loginDirect(request, deviceId)
+            call.respond(ApiResponse(data = data))
+        }
+
         post("/login/password") {
             val request = call.receive<DoctorPasswordLoginRequest>()
-            val deviceId = call.requireDeviceId(service)
+            val deviceId = call.requireDeviceId()
             val data = service.loginWithPassword(request, deviceId)
             call.respond(ApiResponse(data = data))
         }
 
         post("/token/refresh") {
             val request = call.receive<DoctorTokenRefreshRequest>()
-            val deviceId = call.requireDeviceId(service)
+            val deviceId = call.requireDeviceId()
             val data = service.refreshToken(request, deviceId)
             call.respond(ApiResponse(data = data))
         }
@@ -77,7 +94,7 @@ fun Route.registerDoctorAuthRoutes(service: DoctorService) {
                     message = "Unauthorized",
                     status = HttpStatusCode.Unauthorized
                 )
-                val deviceId = call.requireDeviceId(service)
+                val deviceId = call.requireDeviceId()
                 val request = runCatching { call.receive<DoctorLogoutRequest>() }.getOrDefault(DoctorLogoutRequest())
                 service.logout(principal.doctorId, deviceId, request)
                 call.respond(ApiResponse<Unit>(message = "Logged out"))
@@ -86,7 +103,6 @@ fun Route.registerDoctorAuthRoutes(service: DoctorService) {
     }
 }
 
-private fun io.ktor.server.application.ApplicationCall.requireDeviceId(service: DoctorService): String {
-    val value = request.headers[DEVICE_ID_HEADER].orEmpty()
-    return service.validateDeviceId(value)
+private fun io.ktor.server.application.ApplicationCall.requireDeviceId(): String {
+    return requireDeviceIdHeader(request.headers[DEVICE_ID_HEADER])
 }

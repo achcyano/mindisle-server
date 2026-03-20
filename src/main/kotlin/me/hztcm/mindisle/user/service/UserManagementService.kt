@@ -1,6 +1,10 @@
 package me.hztcm.mindisle.user.service
 
 import io.ktor.http.HttpStatusCode
+import me.hztcm.mindisle.auth.ensureNoControlChars as ensureNoControlCharsCommon
+import me.hztcm.mindisle.auth.validatePassword as validatePasswordCommon
+import me.hztcm.mindisle.auth.validateSmsCode as validateSmsCodeCommon
+import me.hztcm.mindisle.auth.validateToken as validateTokenCommon
 import me.hztcm.mindisle.DEBUG
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
@@ -86,16 +90,11 @@ class UserManagementService(
         const val WEIGHT_KG_MAX = 500.0
         const val WAIST_CM_MIN = 30.0
         const val WAIST_CM_MAX = 220.0
-        const val SMS_CODE_LENGTH = 6
-        const val TOKEN_MAX_LENGTH = 512
-        const val PASSWORD_MIN_LENGTH = 6
-        const val PASSWORD_MAX_LENGTH = 20
         const val AVATAR_SIZE_PX = 1024
         const val AVATAR_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
         const val AVATAR_CONTENT_TYPE = "image/png"
         const val AVATAR_STORAGE_DIR = "data/avatars"
         const val AVATAR_API_URL = "/api/v1/users/me/avatar"
-        val SMS_CODE_REGEX = Regex("^\\d{6}$")
     }
 
     suspend fun sendSmsCode(request: SendSmsCodeRequest, requestIp: String?) {
@@ -576,35 +575,15 @@ class UserManagementService(
     }
 
     private fun validatePassword(password: String) {
-        ensureNoControlChars("password", password)
-        if (password.length !in PASSWORD_MIN_LENGTH..PASSWORD_MAX_LENGTH) {
-            throw AppException(
-                code = ErrorCodes.PASSWORD_TOO_SHORT,
-                message = "Password length must be between $PASSWORD_MIN_LENGTH and $PASSWORD_MAX_LENGTH characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
+        validatePasswordCommon(password)
     }
 
     private fun validateSmsCode(smsCode: String) {
-        if (!SMS_CODE_REGEX.matches(smsCode)) {
-            throw AppException(
-                code = ErrorCodes.INVALID_SMS_CODE,
-                message = "Invalid sms code format",
-                status = HttpStatusCode.BadRequest
-            )
-        }
+        validateSmsCodeCommon(smsCode)
     }
 
     private fun validateToken(fieldName: String, value: String) {
-        ensureNoControlChars(fieldName, value)
-        if (value.length > TOKEN_MAX_LENGTH) {
-            throw AppException(
-                code = ErrorCodes.INVALID_REQUEST,
-                message = "$fieldName exceeds $TOKEN_MAX_LENGTH characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
+        validateTokenCommon(fieldName, value)
     }
 
     private fun Transaction.validateSmsBusinessRules(phone: String, purpose: SmsPurpose, now: LocalDateTime) {
@@ -846,13 +825,7 @@ class UserManagementService(
     }
 
     private fun ensureNoControlChars(fieldName: String, value: String) {
-        if (value.any { it.isISOControl() }) {
-            throw AppException(
-                code = ErrorCodes.INVALID_REQUEST,
-                message = "$fieldName contains control characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
+        ensureNoControlCharsCommon(fieldName, value)
     }
 
     private fun Transaction.issueTokenPair(

@@ -1,8 +1,12 @@
 package me.hztcm.mindisle.doctor.service
 
-import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import me.hztcm.mindisle.ai.client.ChatMessage
 import me.hztcm.mindisle.db.DatabaseFactory
+import me.hztcm.mindisle.db.DoctorPatientAssessmentReportsTable
+import me.hztcm.mindisle.db.DoctorPatientBindingStatus
 import me.hztcm.mindisle.db.DoctorPatientBindingsTable
 import me.hztcm.mindisle.db.DoctorPatientGroupChangesTable
 import me.hztcm.mindisle.db.DoctorThresholdSettingsTable
@@ -13,18 +17,25 @@ import me.hztcm.mindisle.db.UserProfilesTable
 import me.hztcm.mindisle.db.UserScaleResultsTable
 import me.hztcm.mindisle.db.UserScaleSessionsTable
 import me.hztcm.mindisle.db.UsersTable
+import me.hztcm.mindisle.model.AssessmentReportListResponse
 import me.hztcm.mindisle.model.AssessmentReportResponse
+import me.hztcm.mindisle.model.AssessmentReportSummaryItem
+import me.hztcm.mindisle.model.DoctorPatientDiagnosisStateResponse
 import me.hztcm.mindisle.model.DoctorPatientGroupingStateResponse
 import me.hztcm.mindisle.model.DoctorPatientItem
 import me.hztcm.mindisle.model.DoctorPatientListResponse
+import me.hztcm.mindisle.model.DoctorPatientSortBy
+import me.hztcm.mindisle.model.DoctorPatientSortOrder
+import me.hztcm.mindisle.model.Gender
 import me.hztcm.mindisle.model.GenerateAssessmentReportRequest
 import me.hztcm.mindisle.model.GroupingChangeHistoryResponse
 import me.hztcm.mindisle.model.GroupingChangeItem
+import me.hztcm.mindisle.model.ListDoctorPatientsQuery
 import me.hztcm.mindisle.model.PatientMetricSnapshot
 import me.hztcm.mindisle.model.PatientScaleTrendPoint
 import me.hztcm.mindisle.model.PatientScaleTrendSeries
 import me.hztcm.mindisle.model.PatientScaleTrendsResponse
-import me.hztcm.mindisle.model.SideEffectSummaryItem
+import me.hztcm.mindisle.model.UpdatePatientDiagnosisRequest
 import me.hztcm.mindisle.model.UpdatePatientGroupingRequest
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.Op
@@ -35,12 +46,23 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.isNull
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.lessEq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
+import java.math.BigDecimal
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.Period
+import java.util.Base64
 
 private const val GROUP_VALUE_MAX_LENGTH = 64
+private const val GROUP_REASON_MAX_LENGTH = 512
+private const val DIAGNOSIS_MAX_LENGTH = 512
+private const val CURSOR_VERSION = 1
 private val TRACKED_SCALE_CODES = listOf("SCL90", "PHQ9", "GAD7", "PSQI")
 
 private const val REPORT_POLISH_SYSTEM_PROMPT = """
@@ -55,78 +77,113 @@ private const val REPORT_POLISH_SYSTEM_PROMPT = """
 internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
     suspend fun listDoctorPatients(
         doctorId: Long,
-        limit: Int,
-        cursor: Long?,
-        keyword: String?,
-        abnormalOnly: Boolean
+        query: ListDoctorPatientsQuery
     ): DoctorPatientListResponse {
-        val safeLimit = limit.coerceIn(1, 50)
-        val normalizedKeyword = keyword?.trim()?.takeIf { it.isNotEmpty() }
+        val safeLimit = query.limit.coerceIn(1, 50)
+        val normalizedKeyword = query.keyword?.trim()?.takeIf { it.isNotEmpty() }
+        val normalizedSeverityGroup = normalizeGroupingFilter("severityGroup", query.severityGroup)
+        val cursorPayload = query.cursor?.let { decodeCursor(it) }
+        val filterHash = computeFilterHash(
+            keyword = normalizedKeyword,
+            gender = query.gender,
+            severityGroup = normalizedSeverityGroup,
+            abnormalOnly = query.abnormalOnly,
+            scl90ScoreMin = query.scl90ScoreMin,
+            scl90ScoreMax = query.scl90ScoreMax
+        )
+        if (cursorPayload != null) {
+            if (cursorPayload.v != CURSOR_VERSION) throw doctorCursorInvalid("Unsupported cursor version")
+            if (cursorPayload.sortBy != query.sortBy.name || cursorPayload.sortOrder != query.sortOrder.name) {
+                throw doctorCursorInvalid("Cursor does not match current sort options")
+            }
+            if (cursorPayload.filterHash != filterHash) throw doctorCursorInvalid("Cursor does not match current filter options")
+        }
         return DatabaseFactory.dbQuery {
             val doctorRef = EntityID(doctorId, DoctorsTable)
             requireDoctor(doctorRef)
+            val snapshotAt = cursorPayload?.let { parseCursorSnapshotAt(it.snapshotAt) } ?: utcNow()
             val scaleCodeById = loadTrackedScaleCodeByScaleId()
             val thresholds = loadDoctorThresholds(doctorRef)
-            val items = mutableListOf<Pair<Long, DoctorPatientItem>>()
-            var scanCursor = cursor
-            var exhausted = false
-            val fetchSize = 100
-
-            while (!exhausted && items.size < safeLimit + 1) {
-                var condition: Op<Boolean> = (DoctorPatientBindingsTable.doctorId eq doctorRef) and
-                    (DoctorPatientBindingsTable.status eq me.hztcm.mindisle.db.DoctorPatientBindingStatus.ACTIVE) and
-                    DoctorPatientBindingsTable.unboundAt.isNull()
-                if (scanCursor != null) {
-                    condition = condition and (DoctorPatientBindingsTable.id less scanCursor)
-                }
-                val chunk = DoctorPatientBindingsTable.selectAll().where {
-                    condition
-                }.orderBy(DoctorPatientBindingsTable.id, SortOrder.DESC).limit(fetchSize).toList()
-                if (chunk.isEmpty()) {
-                    exhausted = true
-                    break
-                }
-                scanCursor = chunk.last()[DoctorPatientBindingsTable.id].value
-
-                chunk.forEach { binding ->
-                    if (items.size >= safeLimit + 1) {
-                        return@forEach
-                    }
-                    val userRef = binding[DoctorPatientBindingsTable.patientUserId]
-                    val userRow = UsersTable.selectAll().where { UsersTable.id eq userRef }.firstOrNull() ?: return@forEach
-                    val profileRow = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq userRef }.firstOrNull()
-                    val fullName = profileRow?.get(UserProfilesTable.fullName)
-                    if (!keywordMatched(normalizedKeyword, userRow[UsersTable.phone], fullName)) {
-                        return@forEach
-                    }
-                    val metricsAndLastAt = loadLatestMetricSnapshot(userRef, scaleCodeById)
-                    val reasons = collectAbnormalReasons(metricsAndLastAt.metrics, thresholds)
-                    val abnormal = reasons.isNotEmpty()
-                    if (abnormalOnly && !abnormal) {
-                        return@forEach
-                    }
-                    items += binding[DoctorPatientBindingsTable.id].value to DoctorPatientItem(
+            val bindings = DoctorPatientBindingsTable.selectAll().where {
+                (DoctorPatientBindingsTable.doctorId eq doctorRef) and
+                    (DoctorPatientBindingsTable.status eq DoctorPatientBindingStatus.ACTIVE) and
+                    DoctorPatientBindingsTable.unboundAt.isNull() and
+                    (DoctorPatientBindingsTable.updatedAt lessEq snapshotAt)
+            }.toList()
+            val entries = bindings.mapNotNull { binding ->
+                val userRef = binding[DoctorPatientBindingsTable.patientUserId]
+                val userRow = UsersTable.selectAll().where { UsersTable.id eq userRef }.firstOrNull() ?: return@mapNotNull null
+                val profileRow = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq userRef }.firstOrNull()
+                val fullName = profileRow?.get(UserProfilesTable.fullName)
+                if (!keywordMatched(normalizedKeyword, userRow[UsersTable.phone], fullName)) return@mapNotNull null
+                val gender = profileRow?.get(UserProfilesTable.gender) ?: Gender.UNKNOWN
+                if (query.gender != null && query.gender != gender) return@mapNotNull null
+                val severityGroup = binding[DoctorPatientBindingsTable.severityGroup]
+                if (normalizedSeverityGroup != null && severityGroup != normalizedSeverityGroup) return@mapNotNull null
+                val diagnosis = binding[DoctorPatientBindingsTable.diagnosis]
+                val metricSnapshot = loadLatestMetricSnapshot(userRef, scaleCodeById, snapshotAt)
+                val latestScl90Score = metricSnapshot.metrics.scl90Total
+                if (query.scl90ScoreMin != null && (latestScl90Score == null || latestScl90Score < query.scl90ScoreMin)) return@mapNotNull null
+                if (query.scl90ScoreMax != null && (latestScl90Score == null || latestScl90Score > query.scl90ScoreMax)) return@mapNotNull null
+                val latestAssessmentAt = loadLatestAssessmentSubmittedAt(userRef, snapshotAt)
+                val reasons = collectAbnormalReasons(metricSnapshot.metrics, thresholds)
+                val abnormal = reasons.isNotEmpty()
+                if (query.abnormalOnly && !abnormal) return@mapNotNull null
+                val birthDate = profileRow?.get(UserProfilesTable.birthDate)
+                val latestAssessmentAtIso = latestAssessmentAt?.toIsoInstant()
+                PatientListEntry(
+                    item = DoctorPatientItem(
                         patientUserId = userRef.value,
                         phone = userRow[UsersTable.phone],
                         fullName = fullName,
-                        severityGroup = binding[DoctorPatientBindingsTable.severityGroup],
-                        treatmentPhase = binding[DoctorPatientBindingsTable.treatmentPhase],
-                        lastScaleSubmittedAt = metricsAndLastAt.lastSubmittedAt?.toIsoInstant(),
-                        metrics = metricsAndLastAt.metrics,
+                        gender = gender,
+                        birthDate = birthDate?.toString(),
+                        age = computeAgeYears(birthDate, snapshotAt.toLocalDatePlus8()),
+                        severityGroup = severityGroup,
+                        diagnosis = diagnosis,
+                        latestScl90Score = latestScl90Score,
+                        latestAssessmentAt = latestAssessmentAtIso,
+                        lastScaleSubmittedAt = latestAssessmentAtIso,
+                        metrics = metricSnapshot.metrics,
                         abnormal = abnormal,
                         abnormalReasons = reasons
-                    )
-                }
-                if (chunk.size < fetchSize) {
-                    exhausted = true
-                }
+                    ),
+                    latestAssessmentAt = latestAssessmentAt,
+                    latestScl90Score = latestScl90Score
+                )
             }
-            val hasMore = items.size > safeLimit
-            val page = if (hasMore) items.take(safeLimit) else items
-            DoctorPatientListResponse(
-                items = page.map { it.second },
-                nextCursor = if (hasMore) page.last().first.toString() else null
-            )
+            val sortedEntries = entries.sortedWith { left, right ->
+                val primary = compareEntries(left, right, query.sortBy, query.sortOrder)
+                if (primary != 0) primary else right.item.patientUserId.compareTo(left.item.patientUserId)
+            }
+            val startIndex = if (cursorPayload == null) {
+                0
+            } else {
+                val index = sortedEntries.indexOfFirst { entry ->
+                    entry.item.patientUserId == cursorPayload.lastPatientUserId &&
+                        cursorSortValue(entry, query.sortBy) == cursorPayload.lastSortValue
+                }
+                if (index < 0) throw doctorCursorInvalid("Cursor points to unavailable data")
+                index + 1
+            }
+            val pageWindow = sortedEntries.drop(startIndex)
+            val hasMore = pageWindow.size > safeLimit
+            val page = if (hasMore) pageWindow.take(safeLimit) else pageWindow
+            val nextCursor = if (hasMore) {
+                val last = page.last()
+                encodeCursor(
+                    PatientListCursorPayload(
+                        v = CURSOR_VERSION,
+                        snapshotAt = snapshotAt.toIsoInstant(),
+                        sortBy = query.sortBy.name,
+                        sortOrder = query.sortOrder.name,
+                        filterHash = filterHash,
+                        lastSortValue = cursorSortValue(last, query.sortBy),
+                        lastPatientUserId = last.item.patientUserId
+                    )
+                )
+            } else null
+            DoctorPatientListResponse(items = page.map { it.item }, nextCursor = nextCursor)
         }
     }
 
@@ -136,15 +193,14 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         request: UpdatePatientGroupingRequest
     ): DoctorPatientGroupingStateResponse {
         val severityGroup = normalizeGroupValue(request.severityGroup)
-        val treatmentPhase = normalizeGroupValue(request.treatmentPhase)
+        val reason = normalizeGroupReason(request.reason)
         return DatabaseFactory.dbQuery {
+            val doctorRef = EntityID(doctorId, DoctorsTable)
             val now = utcNow()
             val binding = requireActiveBindingForDoctor(doctorId, patientUserId)
             val oldSeverity = binding[DoctorPatientBindingsTable.severityGroup]
-            val oldPhase = binding[DoctorPatientBindingsTable.treatmentPhase]
             DoctorPatientBindingsTable.update({ DoctorPatientBindingsTable.id eq binding[DoctorPatientBindingsTable.id] }) {
                 it[DoctorPatientBindingsTable.severityGroup] = severityGroup
-                it[DoctorPatientBindingsTable.treatmentPhase] = treatmentPhase
                 it[DoctorPatientBindingsTable.updatedAt] = now
             }
             if (oldSeverity != severityGroup) {
@@ -153,22 +209,35 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                     it[fieldName] = "severityGroup"
                     it[oldValue] = oldSeverity
                     it[newValue] = severityGroup
-                    it[changedAt] = now
-                }
-            }
-            if (oldPhase != treatmentPhase) {
-                DoctorPatientGroupChangesTable.insert {
-                    it[bindingId] = binding[DoctorPatientBindingsTable.id]
-                    it[fieldName] = "treatmentPhase"
-                    it[oldValue] = oldPhase
-                    it[newValue] = treatmentPhase
+                    it[changedByDoctorId] = doctorRef
+                    it[DoctorPatientGroupChangesTable.reason] = reason
                     it[changedAt] = now
                 }
             }
             DoctorPatientGroupingStateResponse(
                 patientUserId = patientUserId,
                 severityGroup = severityGroup,
-                treatmentPhase = treatmentPhase,
+                updatedAt = now.toIsoInstant()
+            )
+        }
+    }
+
+    suspend fun updatePatientDiagnosis(
+        doctorId: Long,
+        patientUserId: Long,
+        request: UpdatePatientDiagnosisRequest
+    ): DoctorPatientDiagnosisStateResponse {
+        val diagnosis = normalizeDiagnosis(request.diagnosis)
+        return DatabaseFactory.dbQuery {
+            val now = utcNow()
+            val binding = requireActiveBindingForDoctor(doctorId, patientUserId)
+            DoctorPatientBindingsTable.update({ DoctorPatientBindingsTable.id eq binding[DoctorPatientBindingsTable.id] }) {
+                it[DoctorPatientBindingsTable.diagnosis] = diagnosis
+                it[DoctorPatientBindingsTable.updatedAt] = now
+            }
+            DoctorPatientDiagnosisStateResponse(
+                patientUserId = patientUserId,
+                diagnosis = diagnosis,
                 updatedAt = now.toIsoInstant()
             )
         }
@@ -202,13 +271,46 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
             }.orderBy(DoctorPatientGroupChangesTable.id, SortOrder.DESC).limit(safeLimit + 1).toList()
             val hasMore = rows.size > safeLimit
             val page = if (hasMore) rows.take(safeLimit) else rows
+            val fallbackBindingRefs = page.mapNotNull { row ->
+                if (row[DoctorPatientGroupChangesTable.changedByDoctorId] == null) {
+                    row[DoctorPatientGroupChangesTable.bindingId]
+                } else {
+                    null
+                }
+            }.distinct()
+            val fallbackDoctorRefByBindingId = if (fallbackBindingRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                DoctorPatientBindingsTable.selectAll().where {
+                    DoctorPatientBindingsTable.id inList fallbackBindingRefs
+                }.associate { it[DoctorPatientBindingsTable.id] to it[DoctorPatientBindingsTable.doctorId] }
+            }
+            val operatorRefs = page.mapNotNull { row ->
+                row[DoctorPatientGroupChangesTable.changedByDoctorId]
+                    ?: fallbackDoctorRefByBindingId[row[DoctorPatientGroupChangesTable.bindingId]]
+            }.distinct()
+            val operatorById = if (operatorRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                DoctorsTable.selectAll().where {
+                    DoctorsTable.id inList operatorRefs
+                }.associateBy { it[DoctorsTable.id].value }
+            }
             GroupingChangeHistoryResponse(
                 items = page.map { row ->
+                    val operatorRef = row[DoctorPatientGroupChangesTable.changedByDoctorId]
+                        ?: fallbackDoctorRefByBindingId[row[DoctorPatientGroupChangesTable.bindingId]]
+                        ?: throw doctorNotFound("Doctor not found")
+                    val operator = operatorById[operatorRef.value]
+                        ?: throw doctorNotFound("Doctor not found")
                     GroupingChangeItem(
                         changeId = row[DoctorPatientGroupChangesTable.id].value,
                         fieldName = row[DoctorPatientGroupChangesTable.fieldName],
                         oldValue = row[DoctorPatientGroupChangesTable.oldValue],
                         newValue = row[DoctorPatientGroupChangesTable.newValue],
+                        operatorDoctorId = operatorRef.value,
+                        operatorDoctorName = operator[DoctorsTable.fullName],
+                        reason = row[DoctorPatientGroupChangesTable.reason],
                         changedAt = row[DoctorPatientGroupChangesTable.changedAt].toIsoInstant()
                     )
                 },
@@ -284,7 +386,7 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
             val user = requireUser(patientRef)
             val profile = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq patientRef }.firstOrNull()
             val scaleCodeById = loadTrackedScaleCodeByScaleId()
-            val metrics = loadLatestMetricSnapshot(patientRef, scaleCodeById).metrics
+            val metrics = loadLatestMetricSnapshot(patientRef, scaleCodeById, utcNow()).metrics
             val trends = getRecentTrendSnapshot(patientRef, safeDays)
             ReportContext(
                 patientUserId = patientUserId,
@@ -315,19 +417,106 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                 model = deps.llmConfig.model
             }
         }
-        return AssessmentReportResponse(
-            patientUserId = patientUserId,
-            generatedAt = generatedAt.toIsoInstant(),
-            polished = polished,
-            model = model,
-            templateReport = template,
-            report = report
-        )
+        return DatabaseFactory.dbQuery {
+            requireActiveBindingForDoctor(doctorId, patientUserId)
+            val doctorRef = EntityID(doctorId, DoctorsTable)
+            val patientRef = EntityID(patientUserId, UsersTable)
+            val now = utcNow()
+            val reportId = DoctorPatientAssessmentReportsTable.insert {
+                it[DoctorPatientAssessmentReportsTable.doctorId] = doctorRef
+                it[DoctorPatientAssessmentReportsTable.patientUserId] = patientRef
+                it[DoctorPatientAssessmentReportsTable.templateReport] = template
+                it[DoctorPatientAssessmentReportsTable.report] = report
+                it[DoctorPatientAssessmentReportsTable.polished] = polished
+                it[DoctorPatientAssessmentReportsTable.model] = model
+                it[DoctorPatientAssessmentReportsTable.days] = safeDays
+                it[DoctorPatientAssessmentReportsTable.generatedAt] = generatedAt
+                it[DoctorPatientAssessmentReportsTable.createdAt] = now
+            }[DoctorPatientAssessmentReportsTable.id]
+            val row = DoctorPatientAssessmentReportsTable.selectAll().where {
+                DoctorPatientAssessmentReportsTable.id eq reportId
+            }.first()
+            row.toAssessmentReportResponse()
+        }
+    }
+
+    suspend fun getLatestAssessmentReport(
+        doctorId: Long,
+        patientUserId: Long
+    ): AssessmentReportResponse {
+        return DatabaseFactory.dbQuery {
+            val doctorRef = EntityID(doctorId, DoctorsTable)
+            val patientRef = EntityID(patientUserId, UsersTable)
+            requireActiveBindingForDoctor(doctorId, patientUserId)
+            val row = DoctorPatientAssessmentReportsTable.selectAll().where {
+                (DoctorPatientAssessmentReportsTable.doctorId eq doctorRef) and
+                    (DoctorPatientAssessmentReportsTable.patientUserId eq patientRef)
+            }.orderBy(
+                DoctorPatientAssessmentReportsTable.generatedAt to SortOrder.DESC,
+                DoctorPatientAssessmentReportsTable.id to SortOrder.DESC
+            )
+                .limit(1)
+                .firstOrNull()
+                ?: throw doctorReportNotFound()
+            row.toAssessmentReportResponse()
+        }
+    }
+
+    suspend fun listAssessmentReports(
+        doctorId: Long,
+        patientUserId: Long,
+        limit: Int,
+        cursor: Long?
+    ): AssessmentReportListResponse {
+        val safeLimit = limit.coerceIn(1, 100)
+        return DatabaseFactory.dbQuery {
+            val doctorRef = EntityID(doctorId, DoctorsTable)
+            val patientRef = EntityID(patientUserId, UsersTable)
+            requireActiveBindingForDoctor(doctorId, patientUserId)
+            var condition: Op<Boolean> =
+                (DoctorPatientAssessmentReportsTable.doctorId eq doctorRef) and
+                    (DoctorPatientAssessmentReportsTable.patientUserId eq patientRef)
+            if (cursor != null) {
+                condition = condition and (DoctorPatientAssessmentReportsTable.id less cursor)
+            }
+            val rows = DoctorPatientAssessmentReportsTable.selectAll().where {
+                condition
+            }.orderBy(DoctorPatientAssessmentReportsTable.id, SortOrder.DESC).limit(safeLimit + 1).toList()
+            val hasMore = rows.size > safeLimit
+            val page = if (hasMore) rows.take(safeLimit) else rows
+            AssessmentReportListResponse(
+                items = page.map { it.toAssessmentReportSummaryItem() },
+                nextCursor = if (hasMore) page.last()[DoctorPatientAssessmentReportsTable.id].value.toString() else null
+            )
+        }
+    }
+
+    suspend fun getAssessmentReportDetail(
+        doctorId: Long,
+        patientUserId: Long,
+        reportId: Long
+    ): AssessmentReportResponse {
+        return DatabaseFactory.dbQuery {
+            val doctorRef = EntityID(doctorId, DoctorsTable)
+            val patientRef = EntityID(patientUserId, UsersTable)
+            requireActiveBindingForDoctor(doctorId, patientUserId)
+            val reportRef = EntityID(reportId, DoctorPatientAssessmentReportsTable)
+            val row = DoctorPatientAssessmentReportsTable.selectAll().where {
+                DoctorPatientAssessmentReportsTable.id eq reportRef
+            }.firstOrNull() ?: throw doctorReportNotFound()
+            if (row[DoctorPatientAssessmentReportsTable.doctorId].value != doctorRef.value) {
+                throw doctorForbidden("No permission to access assessment report")
+            }
+            if (row[DoctorPatientAssessmentReportsTable.patientUserId].value != patientRef.value) {
+                throw doctorReportNotFound()
+            }
+            row.toAssessmentReportResponse()
+        }
     }
 
     private data class MetricSnapshotResult(
         val metrics: PatientMetricSnapshot,
-        val lastSubmittedAt: java.time.LocalDateTime?
+        val lastSubmittedAt: LocalDateTime?
     )
 
     private data class DoctorThresholdSnapshot(
@@ -345,6 +534,23 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         val trendSnapshot: Map<String, List<Pair<String, Double?>>>
     )
 
+    private data class PatientListEntry(
+        val item: DoctorPatientItem,
+        val latestAssessmentAt: LocalDateTime?,
+        val latestScl90Score: Double?
+    )
+
+    @Serializable
+    private data class PatientListCursorPayload(
+        val v: Int,
+        val snapshotAt: String,
+        val sortBy: String,
+        val sortOrder: String,
+        val filterHash: String,
+        val lastSortValue: String? = null,
+        val lastPatientUserId: Long
+    )
+
     private fun org.jetbrains.exposed.sql.Transaction.loadTrackedScaleCodeByScaleId(): Map<Long, String> {
         return ScalesTable.selectAll().where {
             ScalesTable.code inList TRACKED_SCALE_CODES
@@ -353,7 +559,8 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
 
     private fun org.jetbrains.exposed.sql.Transaction.loadLatestMetricSnapshot(
         patientRef: EntityID<Long>,
-        scaleCodeByScaleId: Map<Long, String>
+        scaleCodeByScaleId: Map<Long, String>,
+        snapshotAt: LocalDateTime
     ): MetricSnapshotResult {
         if (scaleCodeByScaleId.isEmpty()) {
             return MetricSnapshotResult(metrics = PatientMetricSnapshot(adherence = null), lastSubmittedAt = null)
@@ -362,7 +569,8 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         val sessions = UserScaleSessionsTable.selectAll().where {
             (UserScaleSessionsTable.userId eq patientRef) and
                 (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED) and
-                (UserScaleSessionsTable.scaleId inList scaleRefs)
+                (UserScaleSessionsTable.scaleId inList scaleRefs) and
+                (UserScaleSessionsTable.submittedAt lessEq snapshotAt)
         }.orderBy(UserScaleSessionsTable.submittedAt, SortOrder.DESC).toList()
         if (sessions.isEmpty()) {
             return MetricSnapshotResult(metrics = PatientMetricSnapshot(adherence = null), lastSubmittedAt = null)
@@ -400,6 +608,20 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
             ),
             lastSubmittedAt = lastSubmittedAt
         )
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.loadLatestAssessmentSubmittedAt(
+        patientRef: EntityID<Long>,
+        snapshotAt: LocalDateTime
+    ): LocalDateTime? {
+        return UserScaleSessionsTable.selectAll().where {
+            (UserScaleSessionsTable.userId eq patientRef) and
+                (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED) and
+                (UserScaleSessionsTable.submittedAt lessEq snapshotAt)
+        }.orderBy(UserScaleSessionsTable.submittedAt, SortOrder.DESC)
+            .limit(1)
+            .firstOrNull()
+            ?.get(UserScaleSessionsTable.submittedAt)
     }
 
     private fun org.jetbrains.exposed.sql.Transaction.loadDoctorThresholds(doctorRef: EntityID<Long>): DoctorThresholdSnapshot {
@@ -463,7 +685,7 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         return trends
     }
 
-    private fun buildTemplateReport(context: ReportContext, days: Int, generatedAt: java.time.LocalDateTime): String {
+    private fun buildTemplateReport(context: ReportContext, days: Int, generatedAt: LocalDateTime): String {
         val lines = mutableListOf<String>()
         lines += "报告生成时间：${generatedAt.toIsoOffsetPlus8()}"
         lines += "观察窗口：近 ${days} 天"
@@ -504,12 +726,135 @@ $templateReport
 """.trimIndent()
     }
 
+    private fun compareEntries(
+        left: PatientListEntry,
+        right: PatientListEntry,
+        sortBy: DoctorPatientSortBy,
+        sortOrder: DoctorPatientSortOrder
+    ): Int {
+        return when (sortBy) {
+            DoctorPatientSortBy.LATEST_ASSESSMENT_AT -> compareNullable(left.latestAssessmentAt, right.latestAssessmentAt, sortOrder)
+            DoctorPatientSortBy.SCL90_SCORE -> compareNullable(left.latestScl90Score, right.latestScl90Score, sortOrder)
+        }
+    }
+
+    private fun <T : Comparable<T>> compareNullable(
+        left: T?,
+        right: T?,
+        sortOrder: DoctorPatientSortOrder
+    ): Int {
+        if (left == null && right == null) return 0
+        if (left == null) return 1
+        if (right == null) return -1
+        return when (sortOrder) {
+            DoctorPatientSortOrder.ASC -> left.compareTo(right)
+            DoctorPatientSortOrder.DESC -> right.compareTo(left)
+        }
+    }
+
+    private fun cursorSortValue(entry: PatientListEntry, sortBy: DoctorPatientSortBy): String? {
+        return when (sortBy) {
+            DoctorPatientSortBy.LATEST_ASSESSMENT_AT -> entry.latestAssessmentAt?.toIsoInstant()
+            DoctorPatientSortBy.SCL90_SCORE -> entry.latestScl90Score?.let { normalizeNumberString(it) }
+        }
+    }
+
+    private fun encodeCursor(payload: PatientListCursorPayload): String {
+        val json = deps.json.encodeToString(payload)
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(json.toByteArray(StandardCharsets.UTF_8))
+    }
+
+    private fun decodeCursor(raw: String): PatientListCursorPayload {
+        val decoded = runCatching {
+            Base64.getUrlDecoder().decode(raw.trim())
+        }.getOrElse {
+            throw doctorCursorInvalid("Invalid cursor encoding")
+        }
+        val payloadJson = decoded.toString(StandardCharsets.UTF_8)
+        return runCatching {
+            deps.json.decodeFromString<PatientListCursorPayload>(payloadJson)
+        }.getOrElse {
+            throw doctorCursorInvalid("Invalid cursor payload")
+        }
+    }
+
+    private fun parseCursorSnapshotAt(raw: String): LocalDateTime {
+        return runCatching { parseInstantToUtcDateTime(raw) }
+            .getOrElse { throw doctorCursorInvalid("Invalid cursor snapshotAt") }
+    }
+
+    private fun computeFilterHash(
+        keyword: String?,
+        gender: Gender?,
+        severityGroup: String?,
+        abnormalOnly: Boolean,
+        scl90ScoreMin: Double?,
+        scl90ScoreMax: Double?
+    ): String {
+        val normalized = listOf(
+            "keyword=${keyword ?: ""}",
+            "gender=${gender?.name ?: ""}",
+            "severityGroup=${severityGroup ?: ""}",
+            "abnormalOnly=$abnormalOnly",
+            "scl90ScoreMin=${scl90ScoreMin?.let { normalizeNumberString(it) } ?: ""}",
+            "scl90ScoreMax=${scl90ScoreMax?.let { normalizeNumberString(it) } ?: ""}"
+        ).joinToString("|")
+        val digest = MessageDigest.getInstance("SHA-256").digest(normalized.toByteArray(StandardCharsets.UTF_8))
+        return digest.joinToString(separator = "") { b -> "%02x".format(b) }
+    }
+
+    private fun normalizeNumberString(value: Double): String {
+        return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
+    }
+
+    private fun computeAgeYears(birthDate: LocalDate?, asOfDate: LocalDate): Int? {
+        if (birthDate == null || birthDate.isAfter(asOfDate)) {
+            return null
+        }
+        return Period.between(birthDate, asOfDate).years
+    }
+
     private fun normalizeGroupValue(value: String?): String? {
         if (value == null) {
             return null
         }
         val normalized = value.trim().takeIf { it.isNotEmpty() }
         validateTextLength("group value", normalized, GROUP_VALUE_MAX_LENGTH)
+        return normalized
+    }
+
+    private fun normalizeGroupReason(value: String?): String? {
+        if (value == null) {
+            return null
+        }
+        val normalized = value.trim().takeIf { it.isNotEmpty() }
+        validateTextLength("group reason", normalized, GROUP_REASON_MAX_LENGTH)
+        return normalized
+    }
+
+    private fun normalizeDiagnosis(value: String?): String? {
+        if (value == null) {
+            return null
+        }
+        val normalized = value.trim().takeIf { it.isNotEmpty() }
+        validateTextLength("diagnosis", normalized, DIAGNOSIS_MAX_LENGTH)
+        return normalized
+    }
+
+    private fun normalizeGroupingFilter(fieldName: String, value: String?): String? {
+        if (value == null) {
+            return null
+        }
+        val normalized = value.trim().takeIf { it.isNotEmpty() }
+        if (normalized == null) {
+            return null
+        }
+        if (normalized.any { it.isISOControl() }) {
+            throw doctorFilterInvalid("$fieldName contains control characters")
+        }
+        if (normalized.length > GROUP_VALUE_MAX_LENGTH) {
+            throw doctorFilterInvalid("$fieldName exceeds $GROUP_VALUE_MAX_LENGTH characters")
+        }
         return normalized
     }
 
@@ -523,5 +868,29 @@ $templateReport
         if (value.length > maxLength) {
             throw doctorInvalidArg("$fieldName exceeds $maxLength characters")
         }
+    }
+
+    private fun ResultRow.toAssessmentReportResponse(): AssessmentReportResponse {
+        return AssessmentReportResponse(
+            reportId = this[DoctorPatientAssessmentReportsTable.id].value,
+            days = this[DoctorPatientAssessmentReportsTable.days],
+            patientUserId = this[DoctorPatientAssessmentReportsTable.patientUserId].value,
+            generatedAt = this[DoctorPatientAssessmentReportsTable.generatedAt].toIsoInstant(),
+            polished = this[DoctorPatientAssessmentReportsTable.polished],
+            model = this[DoctorPatientAssessmentReportsTable.model],
+            templateReport = this[DoctorPatientAssessmentReportsTable.templateReport],
+            report = this[DoctorPatientAssessmentReportsTable.report]
+        )
+    }
+
+    private fun ResultRow.toAssessmentReportSummaryItem(): AssessmentReportSummaryItem {
+        return AssessmentReportSummaryItem(
+            reportId = this[DoctorPatientAssessmentReportsTable.id].value,
+            days = this[DoctorPatientAssessmentReportsTable.days],
+            patientUserId = this[DoctorPatientAssessmentReportsTable.patientUserId].value,
+            generatedAt = this[DoctorPatientAssessmentReportsTable.generatedAt].toIsoInstant(),
+            polished = this[DoctorPatientAssessmentReportsTable.polished],
+            model = this[DoctorPatientAssessmentReportsTable.model]
+        )
     }
 }

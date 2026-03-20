@@ -3,11 +3,14 @@ package me.hztcm.mindisle.doctor.service
 import me.hztcm.mindisle.config.AuthConfig
 import me.hztcm.mindisle.config.LlmConfig
 import me.hztcm.mindisle.model.AssessmentReportResponse
+import me.hztcm.mindisle.model.AssessmentReportListResponse
 import me.hztcm.mindisle.model.CreateMedicationRequest
 import me.hztcm.mindisle.model.CreateSideEffectRequest
+import me.hztcm.mindisle.model.DirectLoginRequest
 import me.hztcm.mindisle.model.DoctorAuthResponse
 import me.hztcm.mindisle.model.DoctorBindingHistoryResponse
 import me.hztcm.mindisle.model.DoctorChangePasswordRequest
+import me.hztcm.mindisle.model.DoctorPatientDiagnosisStateResponse
 import me.hztcm.mindisle.model.DoctorLogoutRequest
 import me.hztcm.mindisle.model.DoctorPasswordLoginRequest
 import me.hztcm.mindisle.model.DoctorPatientGroupingStateResponse
@@ -21,6 +24,9 @@ import me.hztcm.mindisle.model.DoctorTokenRefreshRequest
 import me.hztcm.mindisle.model.GenerateAssessmentReportRequest
 import me.hztcm.mindisle.model.GenerateBindingCodeResponse
 import me.hztcm.mindisle.model.GroupingChangeHistoryResponse
+import me.hztcm.mindisle.model.ListDoctorPatientsQuery
+import me.hztcm.mindisle.model.LoginCheckRequest
+import me.hztcm.mindisle.model.LoginCheckResponse
 import me.hztcm.mindisle.model.ListBindingHistoryResponse
 import me.hztcm.mindisle.model.MedicationItemResponse
 import me.hztcm.mindisle.model.MedicationListResponse
@@ -31,7 +37,9 @@ import me.hztcm.mindisle.model.SendDoctorSmsCodeRequest
 import me.hztcm.mindisle.model.SideEffectItemResponse
 import me.hztcm.mindisle.model.SideEffectSummaryResponse
 import me.hztcm.mindisle.model.UpdateMedicationRequest
+import me.hztcm.mindisle.model.UpdatePatientDiagnosisRequest
 import me.hztcm.mindisle.model.UpdatePatientGroupingRequest
+import me.hztcm.mindisle.model.UpsertDoctorProfileRequest
 import me.hztcm.mindisle.model.WeightTrendResponse
 import me.hztcm.mindisle.security.JwtService
 import me.hztcm.mindisle.sms.SmsGateway
@@ -53,7 +61,8 @@ class DoctorService(
     )
 
     private val authService = DoctorAuthDomainService(deps)
-    private val bindingService = DoctorBindingDomainService(deps)
+    private val bindingCodeService = DoctorBindingCodeDomainService()
+    private val bindingService = DoctorBindingDomainService(bindingCodeService)
     private val patientService = DoctorPatientDomainService(deps)
     private val monitoringService = DoctorMonitoringDomainService(deps)
 
@@ -62,6 +71,12 @@ class DoctorService(
 
     suspend fun register(request: DoctorRegisterRequest, deviceId: String): DoctorAuthResponse =
         authService.register(request, deviceId)
+
+    suspend fun loginCheck(request: LoginCheckRequest, deviceId: String): LoginCheckResponse =
+        authService.loginCheck(request, deviceId)
+
+    suspend fun loginDirect(request: DirectLoginRequest, deviceId: String): DoctorAuthResponse =
+        authService.loginDirect(request, deviceId)
 
     suspend fun loginWithPassword(request: DoctorPasswordLoginRequest, deviceId: String): DoctorAuthResponse =
         authService.loginWithPassword(request, deviceId)
@@ -81,6 +96,9 @@ class DoctorService(
     suspend fun getProfile(doctorId: Long): DoctorProfileResponse =
         authService.getProfile(doctorId)
 
+    suspend fun upsertProfile(doctorId: Long, request: UpsertDoctorProfileRequest): DoctorProfileResponse =
+        authService.upsertProfile(doctorId, request)
+
     suspend fun getThresholdSettings(doctorId: Long): DoctorThresholdSettingsResponse =
         authService.getThresholdSettings(doctorId)
 
@@ -88,7 +106,7 @@ class DoctorService(
         authService.upsertThresholdSettings(doctorId, request)
 
     suspend fun generateBindingCode(doctorId: Long): GenerateBindingCodeResponse =
-        authService.generateBindingCode(doctorId)
+        bindingCodeService.generateBindingCode(doctorId)
 
     suspend fun getPatientBindingStatus(userId: Long): PatientDoctorBindingStatusResponse =
         bindingService.getPatientBindingStatus(userId)
@@ -111,17 +129,20 @@ class DoctorService(
 
     suspend fun listDoctorPatients(
         doctorId: Long,
-        limit: Int,
-        cursor: Long?,
-        keyword: String?,
-        abnormalOnly: Boolean
-    ): DoctorPatientListResponse = patientService.listDoctorPatients(doctorId, limit, cursor, keyword, abnormalOnly)
+        query: ListDoctorPatientsQuery
+    ): DoctorPatientListResponse = patientService.listDoctorPatients(doctorId, query)
 
     suspend fun updatePatientGrouping(
         doctorId: Long,
         patientUserId: Long,
         request: UpdatePatientGroupingRequest
     ): DoctorPatientGroupingStateResponse = patientService.updatePatientGrouping(doctorId, patientUserId, request)
+
+    suspend fun updatePatientDiagnosis(
+        doctorId: Long,
+        patientUserId: Long,
+        request: UpdatePatientDiagnosisRequest
+    ): DoctorPatientDiagnosisStateResponse = patientService.updatePatientDiagnosis(doctorId, patientUserId, request)
 
     suspend fun listGroupingChanges(
         doctorId: Long,
@@ -141,6 +162,24 @@ class DoctorService(
         patientUserId: Long,
         request: GenerateAssessmentReportRequest
     ): AssessmentReportResponse = patientService.generateAssessmentReport(doctorId, patientUserId, request)
+
+    suspend fun getLatestAssessmentReport(
+        doctorId: Long,
+        patientUserId: Long
+    ): AssessmentReportResponse = patientService.getLatestAssessmentReport(doctorId, patientUserId)
+
+    suspend fun listAssessmentReports(
+        doctorId: Long,
+        patientUserId: Long,
+        limit: Int,
+        cursor: Long?
+    ): AssessmentReportListResponse = patientService.listAssessmentReports(doctorId, patientUserId, limit, cursor)
+
+    suspend fun getAssessmentReportDetail(
+        doctorId: Long,
+        patientUserId: Long,
+        reportId: Long
+    ): AssessmentReportResponse = patientService.getAssessmentReportDetail(doctorId, patientUserId, reportId)
 
     suspend fun createPatientMedication(
         doctorId: Long,
@@ -177,6 +216,4 @@ class DoctorService(
 
     suspend fun getPatientWeightTrend(doctorId: Long, patientUserId: Long, days: Int?): WeightTrendResponse =
         monitoringService.getPatientWeightTrend(doctorId, patientUserId, days)
-
-    fun validateDeviceId(deviceId: String): String = authService.validateDeviceId(deviceId)
 }

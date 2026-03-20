@@ -1,15 +1,18 @@
 package me.hztcm.mindisle.doctor.service
 
 import io.ktor.http.HttpStatusCode
+import me.hztcm.mindisle.auth.invalidRequest
+import me.hztcm.mindisle.auth.validatePassword
+import me.hztcm.mindisle.auth.validateSmsCode
+import me.hztcm.mindisle.auth.validateToken
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
 import me.hztcm.mindisle.db.DatabaseFactory
-import me.hztcm.mindisle.db.DoctorBindingCodesTable
+import me.hztcm.mindisle.db.DoctorLoginTicketsTable
 import me.hztcm.mindisle.db.DoctorSessionsTable
 import me.hztcm.mindisle.db.DoctorThresholdSettingsTable
 import me.hztcm.mindisle.db.DoctorsTable
 import me.hztcm.mindisle.db.SessionStatus
-import me.hztcm.mindisle.db.SmsVerificationAttemptsTable
 import me.hztcm.mindisle.db.SmsVerificationCodesTable
 import me.hztcm.mindisle.model.DoctorAuthResponse
 import me.hztcm.mindisle.model.DoctorChangePasswordRequest
@@ -22,10 +25,14 @@ import me.hztcm.mindisle.model.DoctorThresholdSettingsRequest
 import me.hztcm.mindisle.model.DoctorThresholdSettingsResponse
 import me.hztcm.mindisle.model.DoctorTokenPairResponse
 import me.hztcm.mindisle.model.DoctorTokenRefreshRequest
+import me.hztcm.mindisle.model.DirectLoginRequest
 import me.hztcm.mindisle.model.SendDoctorSmsCodeRequest
 import me.hztcm.mindisle.model.SmsPurpose
-import me.hztcm.mindisle.model.GenerateBindingCodeResponse
+import me.hztcm.mindisle.model.LoginCheckRequest
+import me.hztcm.mindisle.model.LoginCheckResponse
+import me.hztcm.mindisle.model.LoginDecision
 import me.hztcm.mindisle.security.PasswordHasher
+import me.hztcm.mindisle.model.UpsertDoctorProfileRequest
 import me.hztcm.mindisle.util.generateSecureToken
 import me.hztcm.mindisle.util.generateSmsCode
 import me.hztcm.mindisle.util.normalizePhone
@@ -38,19 +45,13 @@ import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
-import java.math.BigDecimal
 
-private const val BINDING_CODE_TTL_SECONDS = 10 * 60L
-private const val PASSWORD_MIN_LENGTH = 6
-private const val PASSWORD_MAX_LENGTH = 20
-private const val TOKEN_MAX_LENGTH = 512
-private const val DEVICE_ID_MAX_LENGTH = 128
 private const val NAME_MAX_LENGTH = 200
-private const val TITLE_MAX_LENGTH = 100
 private const val HOSPITAL_MAX_LENGTH = 200
-private val SMS_CODE_REGEX = Regex("^\\d{6}$")
 
 internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
+    private val authPersistence = DoctorAuthPersistenceSupport(deps)
+
     suspend fun sendSmsCode(request: SendDoctorSmsCodeRequest, requestIp: String?) {
         val phone = normalizePhone(request.phone)
         val purpose = request.purpose.toSmsPurpose()
@@ -61,7 +62,7 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
             deps.authConfig.smsCodeTtlSeconds
         }
         DatabaseFactory.dbQuery {
-            validateDoctorSmsBusinessRules(phone, purpose, now)
+            authPersistence.validateDoctorSmsBusinessRules(this, phone, purpose, now)
         }
 
         if (deps.smsGateway == null) {
@@ -102,13 +103,10 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
         val phone = normalizePhone(request.phone)
         validatePassword(request.password)
         validateSmsCode(request.smsCode)
-        val fullName = request.fullName.trim()
-        if (fullName.isEmpty()) {
-            throw doctorInvalidArg("fullName cannot be blank")
-        }
-        validateTextLength("fullName", fullName, NAME_MAX_LENGTH)
-        validateTextLength("title", request.title, TITLE_MAX_LENGTH)
-        validateTextLength("hospital", request.hospital, HOSPITAL_MAX_LENGTH)
+        val normalizedFullName = normalizeDoctorProfileField("fullName", request.fullName, NAME_MAX_LENGTH)
+        val normalizedHospital = normalizeDoctorProfileField("hospital", request.hospital, HOSPITAL_MAX_LENGTH)
+        val fullName = normalizedFullName ?: "Doctor-${phone.takeLast(4)}"
+        validateDoctorTextLength("fullName", fullName, NAME_MAX_LENGTH)
 
         return DatabaseFactory.dbQuery {
             val now = utcNow()
@@ -121,7 +119,7 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
                 )
             }
 
-            val consumed = consumeSmsCode(phone, SmsPurpose.DOCTOR_REGISTER, request.smsCode, now)
+            val consumed = authPersistence.consumeSmsCode(this, phone, SmsPurpose.DOCTOR_REGISTER, request.smsCode, now)
             if (!consumed) {
                 throw AppException(
                     code = ErrorCodes.INVALID_SMS_CODE,
@@ -133,15 +131,88 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
             val doctorId = DoctorsTable.insert {
                 it[DoctorsTable.phone] = phone
                 it[DoctorsTable.fullName] = fullName
-                it[DoctorsTable.title] = request.title?.trim()?.takeIf { v -> v.isNotEmpty() }
-                it[DoctorsTable.hospital] = request.hospital?.trim()?.takeIf { v -> v.isNotEmpty() }
+                it[DoctorsTable.hospital] = normalizedHospital
                 it[DoctorsTable.passwordHash] = PasswordHasher.hash(request.password)
                 it[DoctorsTable.createdAt] = now
                 it[DoctorsTable.updatedAt] = now
                 it[DoctorsTable.lastLoginAt] = now
             }[DoctorsTable.id]
 
-            val token = issueDoctorTokenPair(doctorId, deviceId, now)
+            val token = authPersistence.issueDoctorTokenPair(this, doctorId, deviceId, now)
+            DoctorAuthResponse(
+                doctorId = doctorId.value,
+                token = token
+            )
+        }
+    }
+
+    suspend fun loginCheck(request: LoginCheckRequest, deviceId: String): LoginCheckResponse {
+        val phone = normalizePhone(request.phone)
+        return DatabaseFactory.dbQuery {
+            val doctor = DoctorsTable.selectAll().where { DoctorsTable.phone eq phone }.firstOrNull()
+                ?: return@dbQuery LoginCheckResponse(decision = LoginDecision.REGISTER_REQUIRED)
+            val doctorId = doctor[DoctorsTable.id]
+            val hasTrustedDevice = DoctorSessionsTable.selectAll().where {
+                (DoctorSessionsTable.doctorId eq doctorId) and
+                    (DoctorSessionsTable.deviceId eq deviceId) and
+                    (DoctorSessionsTable.status eq SessionStatus.ACTIVE)
+            }.any()
+
+            if (!hasTrustedDevice) {
+                LoginCheckResponse(decision = LoginDecision.PASSWORD_REQUIRED)
+            } else {
+                val now = utcNow()
+                val ticket = generateSecureToken(32)
+                DoctorLoginTicketsTable.insert {
+                    it[DoctorLoginTicketsTable.doctorId] = doctorId
+                    it[DoctorLoginTicketsTable.phone] = phone
+                    it[DoctorLoginTicketsTable.deviceId] = deviceId
+                    it[DoctorLoginTicketsTable.ticketHash] = sha256Hex(ticket)
+                    it[DoctorLoginTicketsTable.createdAt] = now
+                    it[DoctorLoginTicketsTable.expiresAt] = now.plusSeconds(deps.authConfig.loginTicketTtlSeconds)
+                }
+                LoginCheckResponse(decision = LoginDecision.DIRECT_LOGIN_ALLOWED, ticket = ticket)
+            }
+        }
+    }
+
+    suspend fun loginDirect(request: DirectLoginRequest, deviceId: String): DoctorAuthResponse {
+        val phone = normalizePhone(request.phone)
+        validateToken(fieldName = "ticket", value = request.ticket)
+        return DatabaseFactory.dbQuery {
+            val now = utcNow()
+            val doctor = DoctorsTable.selectAll().where { DoctorsTable.phone eq phone }.firstOrNull()
+                ?: throw AppException(
+                    code = ErrorCodes.REGISTER_REQUIRED,
+                    message = "Phone is not registered",
+                    status = HttpStatusCode.NotFound
+                )
+            val doctorId = doctor[DoctorsTable.id]
+            val validTicket = DoctorLoginTicketsTable.selectAll().where {
+                (DoctorLoginTicketsTable.doctorId eq doctorId) and
+                    (DoctorLoginTicketsTable.phone eq phone) and
+                    (DoctorLoginTicketsTable.deviceId eq deviceId) and
+                    (DoctorLoginTicketsTable.ticketHash eq sha256Hex(request.ticket)) and
+                    DoctorLoginTicketsTable.consumedAt.isNull() and
+                    (DoctorLoginTicketsTable.expiresAt greaterEq now)
+            }.orderBy(DoctorLoginTicketsTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
+
+            if (validTicket == null) {
+                throw AppException(
+                    code = ErrorCodes.LOGIN_TICKET_INVALID,
+                    message = "Invalid or expired login ticket",
+                    status = HttpStatusCode.BadRequest
+                )
+            }
+            DoctorLoginTicketsTable.update({ DoctorLoginTicketsTable.id eq validTicket[DoctorLoginTicketsTable.id] }) {
+                it[DoctorLoginTicketsTable.consumedAt] = now
+            }
+
+            DoctorsTable.update({ DoctorsTable.id eq doctorId }) {
+                it[DoctorsTable.lastLoginAt] = now
+                it[DoctorsTable.updatedAt] = now
+            }
+            val token = authPersistence.issueDoctorTokenPair(this, doctorId, deviceId, now)
             DoctorAuthResponse(
                 doctorId = doctorId.value,
                 token = token
@@ -154,7 +225,11 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
         return DatabaseFactory.dbQuery {
             val now = utcNow()
             val doctor = DoctorsTable.selectAll().where { DoctorsTable.phone eq phone }.firstOrNull()
-                ?: throw doctorNotFound("Doctor not found")
+                ?: throw AppException(
+                    code = ErrorCodes.REGISTER_REQUIRED,
+                    message = "Phone is not registered",
+                    status = HttpStatusCode.NotFound
+                )
             if (!PasswordHasher.verify(request.password, doctor[DoctorsTable.passwordHash])) {
                 throw AppException(
                     code = ErrorCodes.INVALID_CREDENTIALS,
@@ -166,7 +241,7 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
                 it[DoctorsTable.lastLoginAt] = now
                 it[DoctorsTable.updatedAt] = now
             }
-            val token = issueDoctorTokenPair(doctor[DoctorsTable.id], deviceId, now)
+            val token = authPersistence.issueDoctorTokenPair(this, doctor[DoctorsTable.id], deviceId, now)
             DoctorAuthResponse(
                 doctorId = doctor[DoctorsTable.id].value,
                 token = token
@@ -218,8 +293,12 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
         DatabaseFactory.dbQuery {
             val now = utcNow()
             val doctor = DoctorsTable.selectAll().where { DoctorsTable.phone eq phone }.firstOrNull()
-                ?: throw doctorNotFound("Doctor not found")
-            val consumed = consumeSmsCode(phone, SmsPurpose.DOCTOR_RESET_PASSWORD, request.smsCode, now)
+                ?: throw AppException(
+                    code = ErrorCodes.PHONE_NOT_REGISTERED,
+                    message = "Phone is not registered",
+                    status = HttpStatusCode.NotFound
+                )
+            val consumed = authPersistence.consumeSmsCode(this, phone, SmsPurpose.DOCTOR_RESET_PASSWORD, request.smsCode, now)
             if (!consumed) {
                 throw AppException(
                     code = ErrorCodes.INVALID_SMS_CODE,
@@ -297,8 +376,34 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
                 doctorId = doctor[DoctorsTable.id].value,
                 phone = doctor[DoctorsTable.phone],
                 fullName = doctor[DoctorsTable.fullName],
-                title = doctor[DoctorsTable.title],
                 hospital = doctor[DoctorsTable.hospital]
+            )
+        }
+    }
+
+    suspend fun upsertProfile(doctorId: Long, request: UpsertDoctorProfileRequest): DoctorProfileResponse {
+        val normalizedFullName = normalizeDoctorProfileField("fullName", request.fullName, NAME_MAX_LENGTH)
+        val normalizedHospital = normalizeDoctorProfileField("hospital", request.hospital, HOSPITAL_MAX_LENGTH)
+        return DatabaseFactory.dbQuery {
+            val now = utcNow()
+            val doctorRef = EntityID(doctorId, DoctorsTable)
+            val doctor = requireDoctor(doctorRef)
+            if (normalizedFullName != null || normalizedHospital != null) {
+                DoctorsTable.update({ DoctorsTable.id eq doctorRef }) {
+                    if (normalizedFullName != null) {
+                        it[DoctorsTable.fullName] = normalizedFullName
+                    }
+                    if (normalizedHospital != null) {
+                        it[DoctorsTable.hospital] = normalizedHospital
+                    }
+                    it[DoctorsTable.updatedAt] = now
+                }
+            }
+            DoctorProfileResponse(
+                doctorId = doctorId,
+                phone = doctor[DoctorsTable.phone],
+                fullName = normalizedFullName ?: doctor[DoctorsTable.fullName],
+                hospital = normalizedHospital ?: doctor[DoctorsTable.hospital]
             )
         }
     }
@@ -324,10 +429,10 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
         doctorId: Long,
         request: DoctorThresholdSettingsRequest
     ): DoctorThresholdSettingsResponse {
-        validateThreshold("scl90Threshold", request.scl90Threshold)
-        validateThreshold("phq9Threshold", request.phq9Threshold)
-        validateThreshold("gad7Threshold", request.gad7Threshold)
-        validateThreshold("psqiThreshold", request.psqiThreshold)
+        validateDoctorThreshold("scl90Threshold", request.scl90Threshold)
+        validateDoctorThreshold("phq9Threshold", request.phq9Threshold)
+        validateDoctorThreshold("gad7Threshold", request.gad7Threshold)
+        validateDoctorThreshold("psqiThreshold", request.psqiThreshold)
 
         return DatabaseFactory.dbQuery {
             val now = utcNow()
@@ -339,18 +444,18 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
             if (existing == null) {
                 DoctorThresholdSettingsTable.insert {
                     it[DoctorThresholdSettingsTable.doctorId] = doctorRef
-                    it[scl90Threshold] = request.scl90Threshold?.toBigDecimalSafe()
-                    it[phq9Threshold] = request.phq9Threshold?.toBigDecimalSafe()
-                    it[gad7Threshold] = request.gad7Threshold?.toBigDecimalSafe()
-                    it[psqiThreshold] = request.psqiThreshold?.toBigDecimalSafe()
+                    it[scl90Threshold] = request.scl90Threshold?.toDoctorThresholdDecimal()
+                    it[phq9Threshold] = request.phq9Threshold?.toDoctorThresholdDecimal()
+                    it[gad7Threshold] = request.gad7Threshold?.toDoctorThresholdDecimal()
+                    it[psqiThreshold] = request.psqiThreshold?.toDoctorThresholdDecimal()
                     it[updatedAt] = now
                 }
             } else {
                 DoctorThresholdSettingsTable.update({ DoctorThresholdSettingsTable.doctorId eq doctorRef }) {
-                    it[scl90Threshold] = request.scl90Threshold?.toBigDecimalSafe()
-                    it[phq9Threshold] = request.phq9Threshold?.toBigDecimalSafe()
-                    it[gad7Threshold] = request.gad7Threshold?.toBigDecimalSafe()
-                    it[psqiThreshold] = request.psqiThreshold?.toBigDecimalSafe()
+                    it[scl90Threshold] = request.scl90Threshold?.toDoctorThresholdDecimal()
+                    it[phq9Threshold] = request.phq9Threshold?.toDoctorThresholdDecimal()
+                    it[gad7Threshold] = request.gad7Threshold?.toDoctorThresholdDecimal()
+                    it[psqiThreshold] = request.psqiThreshold?.toDoctorThresholdDecimal()
                     it[updatedAt] = now
                 }
             }
@@ -361,274 +466,6 @@ internal class DoctorAuthDomainService(private val deps: DoctorServiceDeps) {
                 psqiThreshold = request.psqiThreshold,
                 updatedAt = now.toIsoInstant()
             )
-        }
-    }
-
-    suspend fun generateBindingCode(doctorId: Long): GenerateBindingCodeResponse {
-        return DatabaseFactory.dbQuery {
-            val now = utcNow()
-            val doctorRef = EntityID(doctorId, DoctorsTable)
-            requireDoctor(doctorRef)
-            val code = generateSmsCode()
-            val expiresAt = now.plusSeconds(BINDING_CODE_TTL_SECONDS)
-            val qrPayload = "mindisle://doctor-bind?code=$code"
-            DoctorBindingCodesTable.insert {
-                it[DoctorBindingCodesTable.doctorId] = doctorRef
-                it[DoctorBindingCodesTable.codeHash] = sha256Hex(code)
-                it[DoctorBindingCodesTable.expiresAt] = expiresAt
-                it[DoctorBindingCodesTable.consumedAt] = null
-                it[DoctorBindingCodesTable.createdAt] = now
-                it[DoctorBindingCodesTable.qrPayload] = qrPayload
-            }
-            GenerateBindingCodeResponse(
-                code = code,
-                expiresAt = expiresAt.toIsoInstant(),
-                qrPayload = qrPayload
-            )
-        }
-    }
-
-    fun validateDeviceId(deviceId: String): String {
-        val value = deviceId.trim()
-        if (value.isEmpty()) {
-            throw doctorInvalidArg("Missing required header: X-Device-Id")
-        }
-        if (value.length > DEVICE_ID_MAX_LENGTH) {
-            throw doctorInvalidArg("X-Device-Id exceeds $DEVICE_ID_MAX_LENGTH characters")
-        }
-        ensureNoControlChars("X-Device-Id", value)
-        return value
-    }
-
-    private fun Double.toBigDecimalSafe(): BigDecimal = BigDecimal.valueOf(this).setScale(2, java.math.RoundingMode.HALF_UP)
-
-    private fun validateThreshold(fieldName: String, value: Double?) {
-        if (value == null) {
-            return
-        }
-        if (!value.isFinite() || value < 0.0 || value > 10_000.0) {
-            throw doctorInvalidArg("$fieldName must be between 0 and 10000")
-        }
-    }
-
-    private fun validatePassword(password: String) {
-        ensureNoControlChars("password", password)
-        if (password.length !in PASSWORD_MIN_LENGTH..PASSWORD_MAX_LENGTH) {
-            throw AppException(
-                code = ErrorCodes.PASSWORD_TOO_SHORT,
-                message = "Password length must be between $PASSWORD_MIN_LENGTH and $PASSWORD_MAX_LENGTH characters",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-    }
-
-    private fun validateToken(fieldName: String, value: String) {
-        ensureNoControlChars(fieldName, value)
-        if (value.length > TOKEN_MAX_LENGTH) {
-            throw doctorInvalidArg("$fieldName exceeds $TOKEN_MAX_LENGTH characters")
-        }
-    }
-
-    private fun validateSmsCode(code: String) {
-        if (!SMS_CODE_REGEX.matches(code)) {
-            throw AppException(
-                code = ErrorCodes.INVALID_SMS_CODE,
-                message = "Invalid sms code format",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-    }
-
-    private fun validateTextLength(fieldName: String, value: String?, maxLength: Int) {
-        if (value == null) {
-            return
-        }
-        ensureNoControlChars(fieldName, value)
-        if (value.length > maxLength) {
-            throw doctorInvalidArg("$fieldName exceeds $maxLength characters")
-        }
-    }
-
-    private fun ensureNoControlChars(fieldName: String, value: String) {
-        if (value.any { it.isISOControl() }) {
-            throw doctorInvalidArg("$fieldName contains control characters")
-        }
-    }
-
-    private fun org.jetbrains.exposed.sql.Transaction.issueDoctorTokenPair(
-        doctorId: EntityID<Long>,
-        deviceId: String,
-        now: java.time.LocalDateTime
-    ): DoctorTokenPairResponse {
-        val refreshToken = generateSecureToken()
-        val refreshHash = sha256Hex(refreshToken)
-        val expiresAt = now.plusSeconds(deps.authConfig.refreshTokenTtlSeconds)
-        val existing = DoctorSessionsTable.selectAll().where {
-            (DoctorSessionsTable.doctorId eq doctorId) and (DoctorSessionsTable.deviceId eq deviceId)
-        }.firstOrNull()
-
-        if (existing == null) {
-            DoctorSessionsTable.insert {
-                it[DoctorSessionsTable.doctorId] = doctorId
-                it[DoctorSessionsTable.deviceId] = deviceId
-                it[DoctorSessionsTable.refreshTokenHash] = refreshHash
-                it[DoctorSessionsTable.status] = SessionStatus.ACTIVE
-                it[DoctorSessionsTable.createdAt] = now
-                it[DoctorSessionsTable.lastUsedAt] = now
-                it[DoctorSessionsTable.expiresAt] = expiresAt
-                it[DoctorSessionsTable.revokedAt] = null
-            }
-        } else {
-            DoctorSessionsTable.update({ DoctorSessionsTable.id eq existing[DoctorSessionsTable.id] }) {
-                it[DoctorSessionsTable.refreshTokenHash] = refreshHash
-                it[DoctorSessionsTable.status] = SessionStatus.ACTIVE
-                it[DoctorSessionsTable.lastUsedAt] = now
-                it[DoctorSessionsTable.expiresAt] = expiresAt
-                it[DoctorSessionsTable.revokedAt] = null
-            }
-        }
-        val (accessToken, accessTtl) = deps.jwtService.generateDoctorAccessToken(doctorId.value, deviceId)
-        return DoctorTokenPairResponse(
-            accessToken = accessToken,
-            refreshToken = refreshToken,
-            accessTokenExpiresInSeconds = accessTtl,
-            refreshTokenExpiresInSeconds = deps.authConfig.refreshTokenTtlSeconds
-        )
-    }
-
-    private fun org.jetbrains.exposed.sql.Transaction.validateDoctorSmsBusinessRules(
-        phone: String,
-        purpose: SmsPurpose,
-        now: java.time.LocalDateTime
-    ) {
-        when (purpose) {
-            SmsPurpose.DOCTOR_REGISTER -> {
-                val exists = DoctorsTable.selectAll().where { DoctorsTable.phone eq phone }.any()
-                if (exists) {
-                    throw AppException(
-                        code = ErrorCodes.PHONE_ALREADY_REGISTERED,
-                        message = "Phone already registered",
-                        status = HttpStatusCode.Conflict
-                    )
-                }
-            }
-
-            SmsPurpose.DOCTOR_RESET_PASSWORD -> {
-                val exists = DoctorsTable.selectAll().where { DoctorsTable.phone eq phone }.any()
-                if (!exists) {
-                    throw doctorNotFound("Doctor not found")
-                }
-            }
-
-            else -> throw doctorInvalidArg("Unsupported sms purpose for doctor flow")
-        }
-
-        val latest = SmsVerificationCodesTable.selectAll().where {
-            SmsVerificationCodesTable.phone eq phone
-        }.orderBy(SmsVerificationCodesTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
-        if (latest != null) {
-            val latestAt = latest[SmsVerificationCodesTable.createdAt]
-            if (latestAt.plusSeconds(deps.authConfig.smsCooldownSeconds) > now) {
-                throw AppException(
-                    code = ErrorCodes.SMS_TOO_FREQUENT,
-                    message = "Sms code requested too frequently",
-                    status = HttpStatusCode.TooManyRequests
-                )
-            }
-        }
-        val dayStart = utcNow().toLocalDate().atStartOfDay()
-        val todayCount = SmsVerificationCodesTable.selectAll().where {
-            (SmsVerificationCodesTable.phone eq phone) and
-                (SmsVerificationCodesTable.createdAt greaterEq dayStart)
-        }.count()
-        if (todayCount >= deps.authConfig.smsDailyLimit) {
-            throw AppException(
-                code = ErrorCodes.SMS_DAILY_LIMIT,
-                message = "Daily sms code limit reached",
-                status = HttpStatusCode.TooManyRequests
-            )
-        }
-    }
-
-    private fun org.jetbrains.exposed.sql.Transaction.consumeSmsCode(
-        phone: String,
-        purpose: SmsPurpose,
-        code: String,
-        now: java.time.LocalDateTime
-    ): Boolean {
-        if (deps.smsGateway != null) {
-            ensureSmsVerificationAttemptAllowed(phone, purpose, now)
-            val success = deps.smsGateway.verifySmsCode(phone = phone, purpose = purpose, code = code)
-            recordSmsVerificationAttempt(phone, purpose, success, now)
-            return success
-        }
-        ensureSmsVerificationAttemptAllowed(phone, purpose, now)
-        val codeHash = sha256Hex(code)
-        val row = SmsVerificationCodesTable.selectAll().where {
-            (SmsVerificationCodesTable.phone eq phone) and
-                (SmsVerificationCodesTable.purpose eq purpose) and
-                (SmsVerificationCodesTable.codeHash eq codeHash) and
-                SmsVerificationCodesTable.consumedAt.isNull() and
-                (SmsVerificationCodesTable.expiresAt greaterEq now)
-        }.orderBy(SmsVerificationCodesTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
-        if (row == null) {
-            recordSmsVerificationAttempt(phone, purpose, false, now)
-            return false
-        }
-        val affected = SmsVerificationCodesTable.update({
-            (SmsVerificationCodesTable.id eq row[SmsVerificationCodesTable.id]) and
-                SmsVerificationCodesTable.consumedAt.isNull()
-        }) {
-            it[SmsVerificationCodesTable.consumedAt] = now
-        }
-        val success = affected > 0
-        recordSmsVerificationAttempt(phone, purpose, success, now)
-        return success
-    }
-
-    private fun org.jetbrains.exposed.sql.Transaction.ensureSmsVerificationAttemptAllowed(
-        phone: String,
-        purpose: SmsPurpose,
-        now: java.time.LocalDateTime
-    ) {
-        val windowStart = now.minusSeconds(deps.authConfig.smsVerifyWindowSeconds)
-        val latestSuccessAt = SmsVerificationAttemptsTable.selectAll().where {
-            (SmsVerificationAttemptsTable.phone eq phone) and
-                (SmsVerificationAttemptsTable.purpose eq purpose) and
-                (SmsVerificationAttemptsTable.success eq true)
-        }.orderBy(SmsVerificationAttemptsTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
-            ?.get(SmsVerificationAttemptsTable.createdAt)
-        val effectiveStart = if (latestSuccessAt != null && latestSuccessAt > windowStart) {
-            latestSuccessAt
-        } else {
-            windowStart
-        }
-        val failedAttempts = SmsVerificationAttemptsTable.selectAll().where {
-            (SmsVerificationAttemptsTable.phone eq phone) and
-                (SmsVerificationAttemptsTable.purpose eq purpose) and
-                (SmsVerificationAttemptsTable.success eq false) and
-                (SmsVerificationAttemptsTable.createdAt greaterEq effectiveStart)
-        }.count()
-        if (failedAttempts >= deps.authConfig.smsVerifyMaxAttempts) {
-            throw AppException(
-                code = ErrorCodes.SMS_VERIFY_TOO_MANY_ATTEMPTS,
-                message = "Sms code verification attempts exceeded, please retry later",
-                status = HttpStatusCode.TooManyRequests
-            )
-        }
-    }
-
-    private fun org.jetbrains.exposed.sql.Transaction.recordSmsVerificationAttempt(
-        phone: String,
-        purpose: SmsPurpose,
-        success: Boolean,
-        now: java.time.LocalDateTime
-    ) {
-        SmsVerificationAttemptsTable.insert {
-            it[SmsVerificationAttemptsTable.phone] = phone
-            it[SmsVerificationAttemptsTable.purpose] = purpose
-            it[SmsVerificationAttemptsTable.success] = success
-            it[SmsVerificationAttemptsTable.createdAt] = now
         }
     }
 }

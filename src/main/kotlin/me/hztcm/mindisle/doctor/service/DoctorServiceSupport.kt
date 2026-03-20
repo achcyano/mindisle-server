@@ -78,6 +78,54 @@ internal fun doctorInvalidArg(message: String): AppException {
     )
 }
 
+internal fun doctorFilterInvalid(message: String): AppException {
+    return AppException(
+        code = ErrorCodes.DOCTOR_FILTER_INVALID,
+        message = message,
+        status = HttpStatusCode.BadRequest
+    )
+}
+
+internal fun doctorSortInvalid(message: String): AppException {
+    return AppException(
+        code = ErrorCodes.DOCTOR_SORT_INVALID,
+        message = message,
+        status = HttpStatusCode.BadRequest
+    )
+}
+
+internal fun doctorCursorInvalid(message: String): AppException {
+    return AppException(
+        code = ErrorCodes.DOCTOR_CURSOR_INVALID,
+        message = message,
+        status = HttpStatusCode.BadRequest
+    )
+}
+
+internal fun doctorFeatureNotSupported(message: String): AppException {
+    return AppException(
+        code = ErrorCodes.DOCTOR_FEATURE_NOT_SUPPORTED,
+        message = message,
+        status = HttpStatusCode.BadRequest
+    )
+}
+
+internal fun doctorReportNotFound(): AppException {
+    return AppException(
+        code = ErrorCodes.DOCTOR_REPORT_NOT_FOUND,
+        message = "Assessment report not found",
+        status = HttpStatusCode.NotFound
+    )
+}
+
+internal fun doctorForbidden(message: String): AppException {
+    return AppException(
+        code = ErrorCodes.DOCTOR_FORBIDDEN,
+        message = message,
+        status = HttpStatusCode.Forbidden
+    )
+}
+
 internal fun org.jetbrains.exposed.sql.Transaction.requireUser(userId: EntityID<Long>): ResultRow {
     return UsersTable.selectAll().where { UsersTable.id eq userId }.firstOrNull()
         ?: throw AppException(
@@ -122,11 +170,9 @@ internal fun toBindingInfo(binding: ResultRow, doctor: ResultRow): DoctorBinding
         bindingId = binding[DoctorPatientBindingsTable.id].value,
         doctorId = doctor[DoctorsTable.id].value,
         doctorName = doctor[DoctorsTable.fullName],
-        doctorTitle = doctor[DoctorsTable.title],
         doctorHospital = doctor[DoctorsTable.hospital],
         boundAt = binding[DoctorPatientBindingsTable.boundAt].toIsoInstant(),
-        severityGroup = binding[DoctorPatientBindingsTable.severityGroup],
-        treatmentPhase = binding[DoctorPatientBindingsTable.treatmentPhase]
+        severityGroup = binding[DoctorPatientBindingsTable.severityGroup]
     )
 }
 

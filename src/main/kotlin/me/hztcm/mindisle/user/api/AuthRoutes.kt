@@ -8,6 +8,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
+import me.hztcm.mindisle.auth.requireDeviceIdHeader
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
 import me.hztcm.mindisle.model.ApiResponse
@@ -23,7 +24,6 @@ import me.hztcm.mindisle.security.UserPrincipal
 import me.hztcm.mindisle.user.service.UserManagementService
 
 private const val DEVICE_ID_HEADER = "X-Device-Id"
-private const val DEVICE_ID_MAX_LENGTH = 128
 
 fun Route.registerAuthRoutes(service: UserManagementService) {
     route("/auth") {
@@ -93,28 +93,6 @@ fun Route.registerAuthRoutes(service: UserManagementService) {
 }
 
 private fun io.ktor.server.application.ApplicationCall.requireDeviceId(): String {
-    val value = request.headers[DEVICE_ID_HEADER]?.trim().orEmpty()
-    if (value.isEmpty()) {
-        throw AppException(
-            code = ErrorCodes.INVALID_REQUEST,
-            message = "Missing required header: $DEVICE_ID_HEADER",
-            status = HttpStatusCode.BadRequest
-        )
-    }
-    if (value.length > DEVICE_ID_MAX_LENGTH) {
-        throw AppException(
-            code = ErrorCodes.INVALID_REQUEST,
-            message = "$DEVICE_ID_HEADER exceeds $DEVICE_ID_MAX_LENGTH characters",
-            status = HttpStatusCode.BadRequest
-        )
-    }
-    if (value.any { it.isISOControl() }) {
-        throw AppException(
-            code = ErrorCodes.INVALID_REQUEST,
-            message = "$DEVICE_ID_HEADER contains control characters",
-            status = HttpStatusCode.BadRequest
-        )
-    }
-    return value
+    return requireDeviceIdHeader(request.headers[DEVICE_ID_HEADER])
 }
 

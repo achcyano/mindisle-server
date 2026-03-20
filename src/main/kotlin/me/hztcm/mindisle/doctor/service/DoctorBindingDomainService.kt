@@ -16,13 +16,11 @@ import me.hztcm.mindisle.model.DoctorPatientBindingHistoryItem
 import me.hztcm.mindisle.model.ListBindingHistoryResponse
 import me.hztcm.mindisle.model.PatientBindDoctorRequest
 import me.hztcm.mindisle.model.PatientDoctorBindingStatusResponse
-import me.hztcm.mindisle.util.sha256Hex
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.and
@@ -30,9 +28,9 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
 
-private val SMS_CODE_REGEX = Regex("^\\d{6}$")
-
-internal class DoctorBindingDomainService(private val deps: DoctorServiceDeps) {
+internal class DoctorBindingDomainService(
+    private val bindingCodeService: DoctorBindingCodeDomainService
+) {
     suspend fun getPatientBindingStatus(userId: Long): PatientDoctorBindingStatusResponse {
         return DatabaseFactory.dbQuery {
             val now = utcNow()
@@ -56,29 +54,12 @@ internal class DoctorBindingDomainService(private val deps: DoctorServiceDeps) {
     }
 
     suspend fun bindPatientToDoctor(userId: Long, request: PatientBindDoctorRequest): PatientDoctorBindingStatusResponse {
-        val code = request.bindingCode.trim()
-        if (!SMS_CODE_REGEX.matches(code)) {
-            throw AppException(
-                code = ErrorCodes.DOCTOR_BINDING_CODE_INVALID,
-                message = "bindingCode must be 6 digits",
-                status = HttpStatusCode.BadRequest
-            )
-        }
+        val code = normalizeAndValidateDoctorBindingCode(request.bindingCode)
         return DatabaseFactory.dbQuery {
             val now = utcNow()
             val userRef = EntityID(userId, UsersTable)
             requireUser(userRef)
-            val codeHash = sha256Hex(code)
-            val codeRow = DoctorBindingCodesTable.selectAll().where {
-                (DoctorBindingCodesTable.codeHash eq codeHash) and
-                    DoctorBindingCodesTable.consumedAt.isNull() and
-                    (DoctorBindingCodesTable.expiresAt greaterEq now)
-            }.orderBy(DoctorBindingCodesTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
-                ?: throw AppException(
-                    code = ErrorCodes.DOCTOR_BINDING_CODE_INVALID,
-                    message = "Binding code invalid or expired",
-                    status = HttpStatusCode.BadRequest
-                )
+            val codeRow = bindingCodeService.findActiveCodeRowOrThrow(this, code, now)
             val active = findActiveBindingByPatient(userRef)
             if (active != null) {
                 val activeDoctorId = active[DoctorPatientBindingsTable.doctorId].value
@@ -90,7 +71,7 @@ internal class DoctorBindingDomainService(private val deps: DoctorServiceDeps) {
                         status = HttpStatusCode.Conflict
                     )
                 }
-                consumeBindingCodeRow(codeRow[DoctorBindingCodesTable.id], now)
+                bindingCodeService.consumeCodeRowOrThrow(this, codeRow[DoctorBindingCodesTable.id], now)
                 val doctor = requireDoctor(active[DoctorPatientBindingsTable.doctorId])
                 return@dbQuery PatientDoctorBindingStatusResponse(
                     isBound = true,
@@ -99,12 +80,13 @@ internal class DoctorBindingDomainService(private val deps: DoctorServiceDeps) {
                 )
             }
 
-            consumeBindingCodeRow(codeRow[DoctorBindingCodesTable.id], now)
+            bindingCodeService.consumeCodeRowOrThrow(this, codeRow[DoctorBindingCodesTable.id], now)
             val bindingId = DoctorPatientBindingsTable.insert {
                 it[patientUserId] = userRef
                 it[doctorId] = codeRow[DoctorBindingCodesTable.doctorId]
                 it[status] = DoctorPatientBindingStatus.ACTIVE
                 it[severityGroup] = null
+                it[diagnosis] = null
                 it[treatmentPhase] = null
                 it[boundAt] = now
                 it[unboundAt] = null
@@ -178,13 +160,11 @@ internal class DoctorBindingDomainService(private val deps: DoctorServiceDeps) {
                     bindingId = row[DoctorPatientBindingsTable.id].value,
                     doctorId = doctor[DoctorsTable.id].value,
                     doctorName = doctor[DoctorsTable.fullName],
-                    doctorTitle = doctor[DoctorsTable.title],
                     doctorHospital = doctor[DoctorsTable.hospital],
                     status = row[DoctorPatientBindingsTable.status].name,
                     boundAt = row[DoctorPatientBindingsTable.boundAt].toIsoInstant(),
                     unboundAt = row[DoctorPatientBindingsTable.unboundAt]?.toIsoInstant(),
-                    severityGroup = row[DoctorPatientBindingsTable.severityGroup],
-                    treatmentPhase = row[DoctorPatientBindingsTable.treatmentPhase]
+                    severityGroup = row[DoctorPatientBindingsTable.severityGroup]
                 )
             }
             ListBindingHistoryResponse(
@@ -233,8 +213,7 @@ internal class DoctorBindingDomainService(private val deps: DoctorServiceDeps) {
                     status = row[DoctorPatientBindingsTable.status].name,
                     boundAt = row[DoctorPatientBindingsTable.boundAt].toIsoInstant(),
                     unboundAt = row[DoctorPatientBindingsTable.unboundAt]?.toIsoInstant(),
-                    severityGroup = row[DoctorPatientBindingsTable.severityGroup],
-                    treatmentPhase = row[DoctorPatientBindingsTable.treatmentPhase]
+                    severityGroup = row[DoctorPatientBindingsTable.severityGroup]
                 )
             }
             DoctorBindingHistoryResponse(
@@ -244,21 +223,4 @@ internal class DoctorBindingDomainService(private val deps: DoctorServiceDeps) {
         }
     }
 
-    private fun org.jetbrains.exposed.sql.Transaction.consumeBindingCodeRow(
-        rowId: EntityID<Long>,
-        consumedAt: java.time.LocalDateTime
-    ) {
-        val affected = DoctorBindingCodesTable.update({
-            (DoctorBindingCodesTable.id eq rowId) and DoctorBindingCodesTable.consumedAt.isNull()
-        }) {
-            it[DoctorBindingCodesTable.consumedAt] = consumedAt
-        }
-        if (affected <= 0) {
-            throw AppException(
-                code = ErrorCodes.DOCTOR_BINDING_CODE_INVALID,
-                message = "Binding code invalid or expired",
-                status = HttpStatusCode.BadRequest
-            )
-        }
-    }
 }
