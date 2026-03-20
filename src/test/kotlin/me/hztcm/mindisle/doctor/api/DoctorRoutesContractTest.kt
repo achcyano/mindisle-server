@@ -137,6 +137,27 @@ class DoctorRoutesContractTest {
     }
 
     @Test
+    fun `PUT doctors patient grouping rejects reason in request body`() = testApplication {
+        val service = mockk<DoctorService>()
+        val jwtService = JwtService(AppConfig.auth)
+        val (doctorAccessToken, _) = jwtService.generateDoctorAccessToken(doctorId = 1L, deviceId = "test-device")
+
+        application {
+            installDoctorRouteTestApp(service, jwtService)
+        }
+
+        val response = client.put("/doctors/me/patients/2/grouping") {
+            bearerAuth(doctorAccessToken)
+            contentType(ContentType.Application.Json)
+            setBody("""{"severityGroup":"HIGH","reason":"manual"}""")
+        }
+        val body = response.bodyAsText()
+
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+        assertTrue(body.contains("\"code\":40046"), body)
+    }
+
+    @Test
     fun `PUT doctors patient diagnosis updates diagnosis`() = testApplication {
         val service = mockk<DoctorService>()
         val jwtService = JwtService(AppConfig.auth)

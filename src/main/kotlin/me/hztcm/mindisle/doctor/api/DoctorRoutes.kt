@@ -455,9 +455,15 @@ private suspend fun parseUpdatePatientGroupingRequest(call: ApplicationCall): Up
             status = HttpStatusCode.BadRequest
         )
     }
+    if (payload.containsKey("reason")) {
+        throw AppException(
+            code = ErrorCodes.DOCTOR_FEATURE_NOT_SUPPORTED,
+            message = "reason is not supported in current version",
+            status = HttpStatusCode.BadRequest
+        )
+    }
     return UpdatePatientGroupingRequest(
-        severityGroup = parseNullableStringField(payload, "severityGroup"),
-        reason = parseNullableStringField(payload, "reason")
+        severityGroup = parseNullableStringField(payload, "severityGroup")
     )
 }
 

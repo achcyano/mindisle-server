@@ -186,8 +186,7 @@ data class ListDoctorPatientsQuery(
 
 @Serializable
 data class UpdatePatientGroupingRequest(
-    val severityGroup: String? = null,
-    val reason: String? = null
+    val severityGroup: String? = null
 )
 
 @Serializable
@@ -217,7 +216,6 @@ data class GroupingChangeItem(
     val newValue: String? = null,
     val operatorDoctorId: Long,
     val operatorDoctorName: String,
-    val reason: String? = null,
     val changedAt: String
 )
 

@@ -172,13 +172,14 @@ Base URL: `/api/v1`
    - 本期未落地依从性统计：若传入 `adherenceRateMin/Max`、`missedDoseRateMin/Max` 或依从性排序字段，返回 `40046 DOCTOR_FEATURE_NOT_SUPPORTED`。
    - `treatmentPhase` 已下线：若传入 `treatmentPhase` 查询参数，返回 `40046 DOCTOR_FEATURE_NOT_SUPPORTED`。
 4. `PUT /doctors/me/patients/{patientUserId}/grouping`
-   - 入参：`severityGroup?/reason?`
+   - 入参：`severityGroup?`
    - 若请求体包含 `treatmentPhase`，返回 `40046 DOCTOR_FEATURE_NOT_SUPPORTED`
+   - 若请求体包含 `reason`，返回 `40046 DOCTOR_FEATURE_NOT_SUPPORTED`
 5. `PUT /doctors/me/patients/{patientUserId}/diagnosis`
    - 入参：`diagnosis?: string | null`
    - 返回：`patientUserId`、`diagnosis`、`updatedAt`
 6. `GET /doctors/me/patients/{patientUserId}/grouping-history`
-   - 返回包含：`operatorDoctorId`、`operatorDoctorName`、`reason`、`changedAt`
+   - 返回包含：`operatorDoctorId`、`operatorDoctorName`、`changedAt`
 7. `GET /doctors/me/patients/{patientUserId}/scale-trends`
 8. `POST /doctors/me/patients/{patientUserId}/assessment-report`
    - 生成并持久化评估报告，返回 `reportId`

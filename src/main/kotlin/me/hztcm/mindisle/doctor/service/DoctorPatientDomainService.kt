@@ -60,7 +60,6 @@ import java.time.Period
 import java.util.Base64
 
 private const val GROUP_VALUE_MAX_LENGTH = 64
-private const val GROUP_REASON_MAX_LENGTH = 512
 private const val DIAGNOSIS_MAX_LENGTH = 512
 private const val CURSOR_VERSION = 1
 private val TRACKED_SCALE_CODES = listOf("SCL90", "PHQ9", "GAD7", "PSQI")
@@ -193,7 +192,6 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         request: UpdatePatientGroupingRequest
     ): DoctorPatientGroupingStateResponse {
         val severityGroup = normalizeGroupValue(request.severityGroup)
-        val reason = normalizeGroupReason(request.reason)
         return DatabaseFactory.dbQuery {
             val doctorRef = EntityID(doctorId, DoctorsTable)
             val now = utcNow()
@@ -210,7 +208,6 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                     it[oldValue] = oldSeverity
                     it[newValue] = severityGroup
                     it[changedByDoctorId] = doctorRef
-                    it[DoctorPatientGroupChangesTable.reason] = reason
                     it[changedAt] = now
                 }
             }
@@ -310,7 +307,6 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                         newValue = row[DoctorPatientGroupChangesTable.newValue],
                         operatorDoctorId = operatorRef.value,
                         operatorDoctorName = operator[DoctorsTable.fullName],
-                        reason = row[DoctorPatientGroupChangesTable.reason],
                         changedAt = row[DoctorPatientGroupChangesTable.changedAt].toIsoInstant()
                     )
                 },
@@ -820,15 +816,6 @@ $templateReport
         }
         val normalized = value.trim().takeIf { it.isNotEmpty() }
         validateTextLength("group value", normalized, GROUP_VALUE_MAX_LENGTH)
-        return normalized
-    }
-
-    private fun normalizeGroupReason(value: String?): String? {
-        if (value == null) {
-            return null
-        }
-        val normalized = value.trim().takeIf { it.isNotEmpty() }
-        validateTextLength("group reason", normalized, GROUP_REASON_MAX_LENGTH)
         return normalized
     }
 
