@@ -37,6 +37,7 @@ object DatabaseFactory {
                 DoctorThresholdSettingsTable,
                 DoctorBindingCodesTable,
                 DoctorPatientBindingsTable,
+                DoctorPatientGroupsTable,
                 DoctorPatientGroupChangesTable,
                 DoctorPatientAssessmentReportsTable,
                 UserAvatarsTable,
@@ -63,6 +64,7 @@ object DatabaseFactory {
                 ScaleResultBandsTable,
                 UserScaleSessionsTable,
                 UserScaleAnswersTable,
+                UserScaleAnswerRecordsTable,
                 UserScaleResultsTable
             )
             ScaleSeedData.seedDefaultsIfEmpty()

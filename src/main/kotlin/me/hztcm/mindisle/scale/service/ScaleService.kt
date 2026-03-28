@@ -31,6 +31,7 @@ import me.hztcm.mindisle.db.ScaleStatus
 import me.hztcm.mindisle.db.ScaleVersionsTable
 import me.hztcm.mindisle.db.ScalesTable
 import me.hztcm.mindisle.db.UserScaleAnswersTable
+import me.hztcm.mindisle.db.UserScaleAnswerRecordsTable
 import me.hztcm.mindisle.db.UserScaleResultsTable
 import me.hztcm.mindisle.db.UserScaleSessionsTable
 import me.hztcm.mindisle.db.UserProfilesTable
@@ -391,6 +392,15 @@ class ScaleService(
             )
             val now = utcNow()
             val sessionRef = sessionRow[UserScaleSessionsTable.id]
+            val normalizedAnswerJson = json.encodeToString(JsonElement.serializer(), evaluation.normalizedAnswer)
+            UserScaleAnswerRecordsTable.insert {
+                it[UserScaleAnswerRecordsTable.sessionId] = sessionRef
+                it[UserScaleAnswerRecordsTable.questionId] = questionRef
+                it[UserScaleAnswerRecordsTable.rawAnswerJson] = json.encodeToString(JsonElement.serializer(), request.answer)
+                it[UserScaleAnswerRecordsTable.normalizedAnswerJson] = normalizedAnswerJson
+                it[UserScaleAnswerRecordsTable.numericScore] = evaluation.numericScore
+                it[UserScaleAnswerRecordsTable.answeredAt] = now
+            }
             val existing = UserScaleAnswersTable.selectAll().where {
                 (UserScaleAnswersTable.sessionId eq sessionRef) and
                     (UserScaleAnswersTable.questionId eq questionRef)
@@ -399,7 +409,7 @@ class ScaleService(
                 UserScaleAnswersTable.insert {
                     it[UserScaleAnswersTable.sessionId] = sessionRef
                     it[UserScaleAnswersTable.questionId] = questionRef
-                    it[answerJson] = json.encodeToString(JsonElement.serializer(), evaluation.normalizedAnswer)
+                    it[answerJson] = normalizedAnswerJson
                     it[numericScore] = evaluation.numericScore
                     it[answeredAt] = now
                     it[updatedAt] = now
@@ -408,7 +418,7 @@ class ScaleService(
                 UserScaleAnswersTable.update({
                     UserScaleAnswersTable.id eq existing[UserScaleAnswersTable.id]
                 }) {
-                    it[answerJson] = json.encodeToString(JsonElement.serializer(), evaluation.normalizedAnswer)
+                    it[answerJson] = normalizedAnswerJson
                     it[numericScore] = evaluation.numericScore
                     it[updatedAt] = now
                 }

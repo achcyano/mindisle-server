@@ -1,6 +1,7 @@
 package me.hztcm.mindisle.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 @Serializable
 enum class DoctorSmsPurpose {
@@ -185,6 +186,24 @@ data class ListDoctorPatientsQuery(
 )
 
 @Serializable
+data class CreateDoctorPatientGroupRequest(
+    val severityGroup: String
+)
+
+@Serializable
+data class DoctorPatientGroupItem(
+    val severityGroup: String,
+    val patientCount: Int,
+    val createdAt: String? = null,
+    val updatedAt: String? = null
+)
+
+@Serializable
+data class DoctorPatientGroupListResponse(
+    val items: List<DoctorPatientGroupItem>
+)
+
+@Serializable
 data class UpdatePatientGroupingRequest(
     val severityGroup: String? = null
 )
@@ -259,6 +278,21 @@ data class DoctorPatientListResponse(
 )
 
 @Serializable
+data class DoctorPatientProfileResponse(
+    val patientUserId: Long,
+    val phone: String,
+    val fullName: String? = null,
+    val gender: Gender = Gender.UNKNOWN,
+    val birthDate: String? = null,
+    val heightCm: Double? = null,
+    val weightKg: Double? = null,
+    val waistCm: Double? = null,
+    val usesTcm: Boolean = false,
+    val diseaseHistory: List<String> = emptyList(),
+    val updatedAt: String? = null
+)
+
+@Serializable
 data class PatientScaleTrendPoint(
     val submittedAt: String,
     val totalScore: Double? = null
@@ -275,6 +309,33 @@ data class PatientScaleTrendSeries(
 data class PatientScaleTrendsResponse(
     val patientUserId: Long,
     val series: List<PatientScaleTrendSeries>
+)
+
+@Serializable
+data class DoctorPatientScaleAnswerRecordItem(
+    val recordId: Long,
+    val sessionId: Long,
+    val scaleId: Long,
+    val scaleCode: String,
+    val scaleName: String,
+    val versionId: Long,
+    val sessionStatus: String,
+    val sessionSubmittedAt: String? = null,
+    val questionId: Long,
+    val questionKey: String,
+    val questionOrderNo: Int,
+    val questionStem: String,
+    val rawAnswer: JsonElement,
+    val normalizedAnswer: JsonElement,
+    val numericScore: Double? = null,
+    val answeredAt: String
+)
+
+@Serializable
+data class DoctorPatientScaleAnswerRecordListResponse(
+    val patientUserId: Long,
+    val items: List<DoctorPatientScaleAnswerRecordItem>,
+    val nextCursor: String? = null
 )
 
 @Serializable

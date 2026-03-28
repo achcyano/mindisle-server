@@ -166,6 +166,18 @@ object DoctorPatientBindingsTable : LongIdTable("doctor_patient_bindings") {
     }
 }
 
+object DoctorPatientGroupsTable : LongIdTable("doctor_patient_groups") {
+    val doctorId = reference("doctor_id", DoctorsTable, onDelete = ReferenceOption.CASCADE)
+    val severityGroup = varchar("severity_group", 64)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        uniqueIndex(doctorId, severityGroup)
+        index(false, doctorId, updatedAt)
+    }
+}
+
 object DoctorPatientGroupChangesTable : LongIdTable("doctor_patient_group_changes") {
     val bindingId = reference("binding_id", DoctorPatientBindingsTable, onDelete = ReferenceOption.CASCADE)
     val fieldName = varchar("field_name", 32)
@@ -515,6 +527,19 @@ object UserScaleAnswersTable : LongIdTable("user_scale_answers") {
     init {
         uniqueIndex(sessionId, questionId)
         index(false, sessionId, updatedAt)
+    }
+}
+
+object UserScaleAnswerRecordsTable : LongIdTable("user_scale_answer_records") {
+    val sessionId = reference("session_id", UserScaleSessionsTable, onDelete = ReferenceOption.CASCADE)
+    val questionId = reference("question_id", ScaleQuestionsTable, onDelete = ReferenceOption.RESTRICT)
+    val rawAnswerJson = text("raw_answer_json")
+    val normalizedAnswerJson = text("normalized_answer_json")
+    val numericScore = decimal("numeric_score", 10, 2).nullable()
+    val answeredAt = datetime("answered_at")
+
+    init {
+        index(false, sessionId, questionId, answeredAt)
     }
 }
 

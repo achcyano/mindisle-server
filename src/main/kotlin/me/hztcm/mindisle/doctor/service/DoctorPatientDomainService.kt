@@ -1,18 +1,27 @@
 package me.hztcm.mindisle.doctor.service
 
+import io.ktor.http.HttpStatusCode
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 import me.hztcm.mindisle.ai.client.ChatMessage
+import me.hztcm.mindisle.common.AppException
+import me.hztcm.mindisle.common.ErrorCodes
 import me.hztcm.mindisle.db.DatabaseFactory
 import me.hztcm.mindisle.db.DoctorPatientAssessmentReportsTable
 import me.hztcm.mindisle.db.DoctorPatientBindingStatus
 import me.hztcm.mindisle.db.DoctorPatientBindingsTable
 import me.hztcm.mindisle.db.DoctorPatientGroupChangesTable
+import me.hztcm.mindisle.db.DoctorPatientGroupsTable
 import me.hztcm.mindisle.db.DoctorThresholdSettingsTable
 import me.hztcm.mindisle.db.DoctorsTable
 import me.hztcm.mindisle.db.ScaleSessionStatus
+import me.hztcm.mindisle.db.ScaleQuestionsTable
 import me.hztcm.mindisle.db.ScalesTable
+import me.hztcm.mindisle.db.UserDiseaseHistoriesTable
+import me.hztcm.mindisle.db.UserScaleAnswerRecordsTable
 import me.hztcm.mindisle.db.UserProfilesTable
 import me.hztcm.mindisle.db.UserScaleResultsTable
 import me.hztcm.mindisle.db.UserScaleSessionsTable
@@ -20,10 +29,16 @@ import me.hztcm.mindisle.db.UsersTable
 import me.hztcm.mindisle.model.AssessmentReportListResponse
 import me.hztcm.mindisle.model.AssessmentReportResponse
 import me.hztcm.mindisle.model.AssessmentReportSummaryItem
+import me.hztcm.mindisle.model.CreateDoctorPatientGroupRequest
 import me.hztcm.mindisle.model.DoctorPatientDiagnosisStateResponse
+import me.hztcm.mindisle.model.DoctorPatientGroupItem
 import me.hztcm.mindisle.model.DoctorPatientGroupingStateResponse
+import me.hztcm.mindisle.model.DoctorPatientGroupListResponse
 import me.hztcm.mindisle.model.DoctorPatientItem
 import me.hztcm.mindisle.model.DoctorPatientListResponse
+import me.hztcm.mindisle.model.DoctorPatientProfileResponse
+import me.hztcm.mindisle.model.DoctorPatientScaleAnswerRecordItem
+import me.hztcm.mindisle.model.DoctorPatientScaleAnswerRecordListResponse
 import me.hztcm.mindisle.model.DoctorPatientSortBy
 import me.hztcm.mindisle.model.DoctorPatientSortOrder
 import me.hztcm.mindisle.model.Gender
@@ -64,8 +79,8 @@ private const val DIAGNOSIS_MAX_LENGTH = 512
 private const val CURSOR_VERSION = 1
 private val TRACKED_SCALE_CODES = listOf("SCL90", "PHQ9", "GAD7", "PSQI")
 
-private const val REPORT_POLISH_SYSTEM_PROMPT = """
-你是精神心理科医生助理。请在不杜撰数据的前提下，将输入的结构化评估草稿润色为简洁、专业、可执行的中文报告。
+private const val REPORT_GENERATION_SYSTEM_PROMPT = """
+你是精神心理科医生助理。请基于输入的结构化评估信息，直接生成简洁、专业、可执行的中文评估报告。
 要求：
 1) 不添加输入中不存在的事实或数值。
 2) 用词克制，不做确定性医疗诊断。
@@ -186,6 +201,71 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         }
     }
 
+    suspend fun listPatientGroups(doctorId: Long): DoctorPatientGroupListResponse {
+        return DatabaseFactory.dbQuery {
+            val doctorRef = EntityID(doctorId, DoctorsTable)
+            requireDoctor(doctorRef)
+            val groupRows = DoctorPatientGroupsTable.selectAll().where {
+                DoctorPatientGroupsTable.doctorId eq doctorRef
+            }.orderBy(DoctorPatientGroupsTable.updatedAt, SortOrder.DESC).toList()
+            val activeBindings = DoctorPatientBindingsTable.selectAll().where {
+                (DoctorPatientBindingsTable.doctorId eq doctorRef) and
+                    (DoctorPatientBindingsTable.status eq DoctorPatientBindingStatus.ACTIVE) and
+                    DoctorPatientBindingsTable.unboundAt.isNull()
+            }.toList()
+            val patientCountByGroup = mutableMapOf<String, Int>()
+            activeBindings.forEach { row ->
+                val name = row[DoctorPatientBindingsTable.severityGroup]?.trim()?.takeIf { it.isNotEmpty() } ?: return@forEach
+                patientCountByGroup[name] = (patientCountByGroup[name] ?: 0) + 1
+            }
+            val groupRowByName = groupRows.associateBy { it[DoctorPatientGroupsTable.severityGroup] }
+            val names = mutableListOf<String>()
+            names += groupRows.map { it[DoctorPatientGroupsTable.severityGroup] }
+            names += patientCountByGroup.keys.filterNot { groupRowByName.containsKey(it) }.sorted()
+            DoctorPatientGroupListResponse(
+                items = names.map { name ->
+                    val row = groupRowByName[name]
+                    DoctorPatientGroupItem(
+                        severityGroup = name,
+                        patientCount = patientCountByGroup[name] ?: 0,
+                        createdAt = row?.get(DoctorPatientGroupsTable.createdAt)?.toIsoInstant(),
+                        updatedAt = row?.get(DoctorPatientGroupsTable.updatedAt)?.toIsoInstant()
+                    )
+                }
+            )
+        }
+    }
+
+    suspend fun createPatientGroup(
+        doctorId: Long,
+        request: CreateDoctorPatientGroupRequest
+    ): DoctorPatientGroupItem {
+        return DatabaseFactory.dbQuery {
+            val doctorRef = EntityID(doctorId, DoctorsTable)
+            requireDoctor(doctorRef)
+            val now = utcNow()
+            val severityGroup = normalizeGroupValue(request.severityGroup)
+                ?: throw doctorInvalidArg("severityGroup must not be blank")
+            upsertGroupDefinition(doctorRef, severityGroup, now)
+            val row = DoctorPatientGroupsTable.selectAll().where {
+                (DoctorPatientGroupsTable.doctorId eq doctorRef) and
+                    (DoctorPatientGroupsTable.severityGroup eq severityGroup)
+            }.orderBy(DoctorPatientGroupsTable.id, SortOrder.DESC).limit(1).first()
+            val patientCount = DoctorPatientBindingsTable.selectAll().where {
+                (DoctorPatientBindingsTable.doctorId eq doctorRef) and
+                    (DoctorPatientBindingsTable.status eq DoctorPatientBindingStatus.ACTIVE) and
+                    DoctorPatientBindingsTable.unboundAt.isNull() and
+                    (DoctorPatientBindingsTable.severityGroup eq severityGroup)
+            }.count().toInt()
+            DoctorPatientGroupItem(
+                severityGroup = severityGroup,
+                patientCount = patientCount,
+                createdAt = row[DoctorPatientGroupsTable.createdAt].toIsoInstant(),
+                updatedAt = row[DoctorPatientGroupsTable.updatedAt].toIsoInstant()
+            )
+        }
+    }
+
     suspend fun updatePatientGrouping(
         doctorId: Long,
         patientUserId: Long,
@@ -201,6 +281,7 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                 it[DoctorPatientBindingsTable.severityGroup] = severityGroup
                 it[DoctorPatientBindingsTable.updatedAt] = now
             }
+            upsertGroupDefinition(doctorRef, severityGroup, now)
             if (oldSeverity != severityGroup) {
                 DoctorPatientGroupChangesTable.insert {
                     it[bindingId] = binding[DoctorPatientBindingsTable.id]
@@ -315,6 +396,37 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         }
     }
 
+    suspend fun getPatientProfile(
+        doctorId: Long,
+        patientUserId: Long
+    ): DoctorPatientProfileResponse {
+        return DatabaseFactory.dbQuery {
+            requireActiveBindingForDoctor(doctorId, patientUserId)
+            val patientRef = EntityID(patientUserId, UsersTable)
+            val userRow = requireUser(patientRef)
+            val profileRow = UserProfilesTable.selectAll().where {
+                UserProfilesTable.userId eq patientRef
+            }.firstOrNull()
+            val diseaseHistory = UserDiseaseHistoriesTable.selectAll().where {
+                UserDiseaseHistoriesTable.userId eq patientRef
+            }.orderBy(UserDiseaseHistoriesTable.id, SortOrder.ASC).map { it[UserDiseaseHistoriesTable.item] }
+
+            DoctorPatientProfileResponse(
+                patientUserId = patientUserId,
+                phone = userRow[UsersTable.phone],
+                fullName = profileRow?.get(UserProfilesTable.fullName),
+                gender = profileRow?.get(UserProfilesTable.gender) ?: Gender.UNKNOWN,
+                birthDate = profileRow?.get(UserProfilesTable.birthDate)?.toString(),
+                heightCm = profileRow?.get(UserProfilesTable.heightCm)?.toDouble(),
+                weightKg = profileRow?.get(UserProfilesTable.weightKg)?.toDouble(),
+                waistCm = profileRow?.get(UserProfilesTable.waistCm)?.toDouble(),
+                usesTcm = profileRow?.get(UserProfilesTable.usesTcm) ?: false,
+                diseaseHistory = diseaseHistory,
+                updatedAt = profileRow?.get(UserProfilesTable.updatedAt)?.toIsoInstant()
+            )
+        }
+    }
+
     suspend fun getPatientScaleTrends(
         doctorId: Long,
         patientUserId: Long,
@@ -370,6 +482,72 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         }
     }
 
+    suspend fun listPatientScaleAnswerRecords(
+        doctorId: Long,
+        patientUserId: Long,
+        limit: Int,
+        cursor: Long?
+    ): DoctorPatientScaleAnswerRecordListResponse {
+        val safeLimit = limit.coerceIn(1, 100)
+        return DatabaseFactory.dbQuery {
+            requireActiveBindingForDoctor(doctorId, patientUserId)
+            val patientRef = EntityID(patientUserId, UsersTable)
+            val joined = UserScaleAnswerRecordsTable.innerJoin(UserScaleSessionsTable)
+            var condition: Op<Boolean> = UserScaleSessionsTable.userId eq patientRef
+            if (cursor != null) {
+                condition = condition and (UserScaleAnswerRecordsTable.id less cursor)
+            }
+            val rows = joined.selectAll().where {
+                condition
+            }.orderBy(UserScaleAnswerRecordsTable.id, SortOrder.DESC).limit(safeLimit + 1).toList()
+            val hasMore = rows.size > safeLimit
+            val page = if (hasMore) rows.take(safeLimit) else rows
+            if (page.isEmpty()) {
+                return@dbQuery DoctorPatientScaleAnswerRecordListResponse(
+                    patientUserId = patientUserId,
+                    items = emptyList(),
+                    nextCursor = null
+                )
+            }
+
+            val scaleRefs = page.map { it[UserScaleSessionsTable.scaleId] }.distinct()
+            val scaleById = ScalesTable.selectAll().where {
+                ScalesTable.id inList scaleRefs
+            }.associateBy { it[ScalesTable.id] }
+            val questionRefs = page.map { it[UserScaleAnswerRecordsTable.questionId] }.distinct()
+            val questionById = ScaleQuestionsTable.selectAll().where {
+                ScaleQuestionsTable.id inList questionRefs
+            }.associateBy { it[ScaleQuestionsTable.id] }
+
+            DoctorPatientScaleAnswerRecordListResponse(
+                patientUserId = patientUserId,
+                items = page.map { row ->
+                    val scale = scaleById[row[UserScaleSessionsTable.scaleId]]
+                    val question = questionById[row[UserScaleAnswerRecordsTable.questionId]]
+                    DoctorPatientScaleAnswerRecordItem(
+                        recordId = row[UserScaleAnswerRecordsTable.id].value,
+                        sessionId = row[UserScaleSessionsTable.id].value,
+                        scaleId = row[UserScaleSessionsTable.scaleId].value,
+                        scaleCode = scale?.get(ScalesTable.code) ?: "",
+                        scaleName = scale?.get(ScalesTable.name) ?: "",
+                        versionId = row[UserScaleSessionsTable.versionId].value,
+                        sessionStatus = row[UserScaleSessionsTable.status].name,
+                        sessionSubmittedAt = row[UserScaleSessionsTable.submittedAt]?.toIsoInstant(),
+                        questionId = row[UserScaleAnswerRecordsTable.questionId].value,
+                        questionKey = question?.get(ScaleQuestionsTable.questionKey) ?: "",
+                        questionOrderNo = question?.get(ScaleQuestionsTable.orderNo) ?: 0,
+                        questionStem = question?.get(ScaleQuestionsTable.stem) ?: "",
+                        rawAnswer = parseJsonElementOrRaw(row[UserScaleAnswerRecordsTable.rawAnswerJson]),
+                        normalizedAnswer = parseJsonElementOrRaw(row[UserScaleAnswerRecordsTable.normalizedAnswerJson]),
+                        numericScore = row[UserScaleAnswerRecordsTable.numericScore]?.toDouble(),
+                        answeredAt = row[UserScaleAnswerRecordsTable.answeredAt].toIsoInstant()
+                    )
+                },
+                nextCursor = if (hasMore) page.last()[UserScaleAnswerRecordsTable.id].value.toString() else null
+            )
+        }
+    }
+
     suspend fun generateAssessmentReport(
         doctorId: Long,
         patientUserId: Long,
@@ -394,25 +572,28 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         }
         val generatedAt = utcNow()
         val template = buildTemplateReport(reportContext, safeDays, generatedAt)
-        var polished = false
-        var report = template
-        var model: String? = null
-        runCatching {
+        val report = runCatching {
             val (output, _) = deps.deepSeekClient.completeTextChat(
                 messages = listOf(
-                    ChatMessage(role = "system", content = REPORT_POLISH_SYSTEM_PROMPT.trimIndent()),
-                    ChatMessage(role = "user", content = buildReportPolishPrompt(template))
+                    ChatMessage(role = "system", content = REPORT_GENERATION_SYSTEM_PROMPT.trimIndent()),
+                    ChatMessage(role = "user", content = buildReportGenerationPrompt(template))
                 ),
                 temperature = 0.2,
                 maxTokens = 1200
             )
-            val normalized = output.trim()
-            if (normalized.isNotEmpty()) {
-                report = normalized
-                polished = true
-                model = deps.llmConfig.model
-            }
-        }
+            output.trim()
+        }.getOrElse { ex ->
+            throw AppException(
+                code = ErrorCodes.AI_UPSTREAM_ERROR,
+                message = "Assessment report generation failed: ${ex.message}",
+                status = HttpStatusCode.BadGateway
+            )
+        }.takeIf { it.isNotEmpty() } ?: throw AppException(
+            code = ErrorCodes.AI_UPSTREAM_ERROR,
+            message = "Assessment report generation failed: empty model output",
+            status = HttpStatusCode.BadGateway
+        )
+        val model: String = deps.llmConfig.model
         return DatabaseFactory.dbQuery {
             requireActiveBindingForDoctor(doctorId, patientUserId)
             val doctorRef = EntityID(doctorId, DoctorsTable)
@@ -423,7 +604,7 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                 it[DoctorPatientAssessmentReportsTable.patientUserId] = patientRef
                 it[DoctorPatientAssessmentReportsTable.templateReport] = template
                 it[DoctorPatientAssessmentReportsTable.report] = report
-                it[DoctorPatientAssessmentReportsTable.polished] = polished
+                it[DoctorPatientAssessmentReportsTable.polished] = true
                 it[DoctorPatientAssessmentReportsTable.model] = model
                 it[DoctorPatientAssessmentReportsTable.days] = safeDays
                 it[DoctorPatientAssessmentReportsTable.generatedAt] = generatedAt
@@ -714,12 +895,16 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         return lines.joinToString("\n")
     }
 
-    private fun buildReportPolishPrompt(templateReport: String): String {
+    private fun buildReportGenerationPrompt(templateReport: String): String {
         return """
-请在不改变事实与数值的前提下润色下述报告草稿：
+请基于以下结构化信息直接生成医生可用的评估报告（中文）：
 
 $templateReport
 """.trimIndent()
+    }
+
+    private fun parseJsonElementOrRaw(raw: String): JsonElement {
+        return runCatching { deps.json.parseToJsonElement(raw) }.getOrElse { JsonPrimitive(raw) }
     }
 
     private fun compareEntries(
@@ -808,6 +993,32 @@ $templateReport
             return null
         }
         return Period.between(birthDate, asOfDate).years
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.upsertGroupDefinition(
+        doctorRef: EntityID<Long>,
+        severityGroup: String?,
+        now: LocalDateTime
+    ) {
+        if (severityGroup == null) {
+            return
+        }
+        val existing = DoctorPatientGroupsTable.selectAll().where {
+            (DoctorPatientGroupsTable.doctorId eq doctorRef) and
+                (DoctorPatientGroupsTable.severityGroup eq severityGroup)
+        }.orderBy(DoctorPatientGroupsTable.id, SortOrder.DESC).limit(1).firstOrNull()
+        if (existing == null) {
+            DoctorPatientGroupsTable.insert {
+                it[DoctorPatientGroupsTable.doctorId] = doctorRef
+                it[DoctorPatientGroupsTable.severityGroup] = severityGroup
+                it[DoctorPatientGroupsTable.createdAt] = now
+                it[DoctorPatientGroupsTable.updatedAt] = now
+            }
+            return
+        }
+        DoctorPatientGroupsTable.update({ DoctorPatientGroupsTable.id eq existing[DoctorPatientGroupsTable.id] }) {
+            it[DoctorPatientGroupsTable.updatedAt] = now
+        }
     }
 
     private fun normalizeGroupValue(value: String?): String? {

@@ -6,15 +6,20 @@ import me.hztcm.mindisle.model.AssessmentReportResponse
 import me.hztcm.mindisle.model.AssessmentReportListResponse
 import me.hztcm.mindisle.model.CreateMedicationRequest
 import me.hztcm.mindisle.model.CreateSideEffectRequest
+import me.hztcm.mindisle.model.CreateDoctorPatientGroupRequest
 import me.hztcm.mindisle.model.DirectLoginRequest
 import me.hztcm.mindisle.model.DoctorAuthResponse
 import me.hztcm.mindisle.model.DoctorBindingHistoryResponse
 import me.hztcm.mindisle.model.DoctorChangePasswordRequest
 import me.hztcm.mindisle.model.DoctorPatientDiagnosisStateResponse
+import me.hztcm.mindisle.model.DoctorPatientGroupItem
+import me.hztcm.mindisle.model.DoctorPatientGroupListResponse
 import me.hztcm.mindisle.model.DoctorLogoutRequest
 import me.hztcm.mindisle.model.DoctorPasswordLoginRequest
+import me.hztcm.mindisle.model.DoctorPatientProfileResponse
 import me.hztcm.mindisle.model.DoctorPatientGroupingStateResponse
 import me.hztcm.mindisle.model.DoctorPatientListResponse
+import me.hztcm.mindisle.model.DoctorPatientScaleAnswerRecordListResponse
 import me.hztcm.mindisle.model.DoctorProfileResponse
 import me.hztcm.mindisle.model.DoctorRegisterRequest
 import me.hztcm.mindisle.model.DoctorResetPasswordRequest
@@ -132,6 +137,12 @@ class DoctorService(
         query: ListDoctorPatientsQuery
     ): DoctorPatientListResponse = patientService.listDoctorPatients(doctorId, query)
 
+    suspend fun listPatientGroups(doctorId: Long): DoctorPatientGroupListResponse =
+        patientService.listPatientGroups(doctorId)
+
+    suspend fun createPatientGroup(doctorId: Long, request: CreateDoctorPatientGroupRequest): DoctorPatientGroupItem =
+        patientService.createPatientGroup(doctorId, request)
+
     suspend fun updatePatientGrouping(
         doctorId: Long,
         patientUserId: Long,
@@ -151,11 +162,24 @@ class DoctorService(
         cursor: Long?
     ): GroupingChangeHistoryResponse = patientService.listGroupingChanges(doctorId, patientUserId, limit, cursor)
 
+    suspend fun getPatientProfile(
+        doctorId: Long,
+        patientUserId: Long
+    ): DoctorPatientProfileResponse = patientService.getPatientProfile(doctorId, patientUserId)
+
     suspend fun getPatientScaleTrends(
         doctorId: Long,
         patientUserId: Long,
         days: Int?
     ): PatientScaleTrendsResponse = patientService.getPatientScaleTrends(doctorId, patientUserId, days)
+
+    suspend fun listPatientScaleAnswerRecords(
+        doctorId: Long,
+        patientUserId: Long,
+        limit: Int,
+        cursor: Long?
+    ): DoctorPatientScaleAnswerRecordListResponse =
+        patientService.listPatientScaleAnswerRecords(doctorId, patientUserId, limit, cursor)
 
     suspend fun generateAssessmentReport(
         doctorId: Long,
