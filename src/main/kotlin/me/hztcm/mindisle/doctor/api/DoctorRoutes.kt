@@ -1,11 +1,15 @@
 package me.hztcm.mindisle.doctor.api
 
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.auth.authenticate
 import io.ktor.server.auth.principal
 import io.ktor.server.request.receive
+import io.ktor.server.response.header
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
@@ -127,6 +131,16 @@ fun Route.registerDoctorRoutes(service: DoctorService) {
                 call.respond(HttpStatusCode.Created, ApiResponse(data = data))
             }
 
+            get("/patients/export") {
+                val data = service.exportDoctorPatients(call.requireDoctorId())
+                call.response.header(HttpHeaders.ContentDisposition, "attachment; filename=\"${data.fileName}\"")
+                call.respondBytes(
+                    bytes = data.zipBytes,
+                    contentType = ContentType.Application.Zip,
+                    status = HttpStatusCode.OK
+                )
+            }
+
             get("/patients") {
                 val limit = parseIntQuery(call, "limit", 20, 1, 50)
                 val cursor = parseOpaqueCursorQuery(call, "cursor")
@@ -193,18 +207,22 @@ fun Route.registerDoctorRoutes(service: DoctorService) {
                 call.respond(ApiResponse(data = data))
             }
 
-            get("/patients/{patientUserId}/scale-trends") {
+            get("/patients/{patientUserId}/scale-history") {
                 val patientUserId = call.requirePathLong("patientUserId")
-                val days = parseOptionalIntQuery(call, "days")
-                val data = service.getPatientScaleTrends(call.requireDoctorId(), patientUserId, days)
+                val limit = parseIntQuery(call, "limit", 20, 1, 100)
+                val cursor = call.request.queryParameters["cursor"]?.trim()?.takeIf { it.isNotEmpty() }
+                val data = service.listPatientScaleHistory(call.requireDoctorId(), patientUserId, limit, cursor)
                 call.respond(ApiResponse(data = data))
             }
 
-            get("/patients/{patientUserId}/scale-answer-records") {
+            get("/patients/{patientUserId}/scales/sessions/{sessionId}/result") {
                 val patientUserId = call.requirePathLong("patientUserId")
-                val limit = parseIntQuery(call, "limit", 20, 1, 100)
-                val cursor = parseOptionalLongQuery(call, "cursor")
-                val data = service.listPatientScaleAnswerRecords(call.requireDoctorId(), patientUserId, limit, cursor)
+                val sessionId = call.requirePathLong("sessionId")
+                val data = service.getPatientScaleSessionResult(
+                    doctorId = call.requireDoctorId(),
+                    patientUserId = patientUserId,
+                    sessionId = sessionId
+                )
                 call.respond(ApiResponse(data = data))
             }
 

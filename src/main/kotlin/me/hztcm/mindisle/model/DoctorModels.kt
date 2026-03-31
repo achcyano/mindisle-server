@@ -1,7 +1,6 @@
 package me.hztcm.mindisle.model
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
 
 @Serializable
 enum class DoctorSmsPurpose {
@@ -290,52 +289,6 @@ data class DoctorPatientProfileResponse(
     val usesTcm: Boolean = false,
     val diseaseHistory: List<String> = emptyList(),
     val updatedAt: String? = null
-)
-
-@Serializable
-data class PatientScaleTrendPoint(
-    val submittedAt: String,
-    val totalScore: Double? = null
-)
-
-@Serializable
-data class PatientScaleTrendSeries(
-    val scaleCode: String,
-    val scaleName: String,
-    val points: List<PatientScaleTrendPoint>
-)
-
-@Serializable
-data class PatientScaleTrendsResponse(
-    val patientUserId: Long,
-    val series: List<PatientScaleTrendSeries>
-)
-
-@Serializable
-data class DoctorPatientScaleAnswerRecordItem(
-    val recordId: Long,
-    val sessionId: Long,
-    val scaleId: Long,
-    val scaleCode: String,
-    val scaleName: String,
-    val versionId: Long,
-    val sessionStatus: String,
-    val sessionSubmittedAt: String? = null,
-    val questionId: Long,
-    val questionKey: String,
-    val questionOrderNo: Int,
-    val questionStem: String,
-    val rawAnswer: JsonElement,
-    val normalizedAnswer: JsonElement,
-    val numericScore: Double? = null,
-    val answeredAt: String
-)
-
-@Serializable
-data class DoctorPatientScaleAnswerRecordListResponse(
-    val patientUserId: Long,
-    val items: List<DoctorPatientScaleAnswerRecordItem>,
-    val nextCursor: String? = null
 )
 
 @Serializable

@@ -4,8 +4,11 @@ import io.ktor.http.HttpStatusCode
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.doubleOrNull
 import me.hztcm.mindisle.ai.client.ChatMessage
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
@@ -17,11 +20,11 @@ import me.hztcm.mindisle.db.DoctorPatientGroupChangesTable
 import me.hztcm.mindisle.db.DoctorPatientGroupsTable
 import me.hztcm.mindisle.db.DoctorThresholdSettingsTable
 import me.hztcm.mindisle.db.DoctorsTable
+import me.hztcm.mindisle.db.ScaleResultBandsTable
 import me.hztcm.mindisle.db.ScaleSessionStatus
-import me.hztcm.mindisle.db.ScaleQuestionsTable
 import me.hztcm.mindisle.db.ScalesTable
+import me.hztcm.mindisle.db.ScaleVersionsTable
 import me.hztcm.mindisle.db.UserDiseaseHistoriesTable
-import me.hztcm.mindisle.db.UserScaleAnswerRecordsTable
 import me.hztcm.mindisle.db.UserProfilesTable
 import me.hztcm.mindisle.db.UserScaleResultsTable
 import me.hztcm.mindisle.db.UserScaleSessionsTable
@@ -37,19 +40,18 @@ import me.hztcm.mindisle.model.DoctorPatientGroupListResponse
 import me.hztcm.mindisle.model.DoctorPatientItem
 import me.hztcm.mindisle.model.DoctorPatientListResponse
 import me.hztcm.mindisle.model.DoctorPatientProfileResponse
-import me.hztcm.mindisle.model.DoctorPatientScaleAnswerRecordItem
-import me.hztcm.mindisle.model.DoctorPatientScaleAnswerRecordListResponse
 import me.hztcm.mindisle.model.DoctorPatientSortBy
 import me.hztcm.mindisle.model.DoctorPatientSortOrder
 import me.hztcm.mindisle.model.Gender
 import me.hztcm.mindisle.model.GenerateAssessmentReportRequest
 import me.hztcm.mindisle.model.GroupingChangeHistoryResponse
 import me.hztcm.mindisle.model.GroupingChangeItem
+import me.hztcm.mindisle.model.ListScaleHistoryResponse
 import me.hztcm.mindisle.model.ListDoctorPatientsQuery
 import me.hztcm.mindisle.model.PatientMetricSnapshot
-import me.hztcm.mindisle.model.PatientScaleTrendPoint
-import me.hztcm.mindisle.model.PatientScaleTrendSeries
-import me.hztcm.mindisle.model.PatientScaleTrendsResponse
+import me.hztcm.mindisle.model.ScaleHistoryItem
+import me.hztcm.mindisle.model.ScaleDimensionResult
+import me.hztcm.mindisle.model.ScaleResultResponse
 import me.hztcm.mindisle.model.UpdatePatientDiagnosisRequest
 import me.hztcm.mindisle.model.UpdatePatientGroupingRequest
 import org.jetbrains.exposed.dao.id.EntityID
@@ -57,6 +59,7 @@ import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.isNull
@@ -427,123 +430,125 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         }
     }
 
-    suspend fun getPatientScaleTrends(
+    suspend fun listPatientScaleHistory(
         doctorId: Long,
         patientUserId: Long,
-        days: Int?
-    ): PatientScaleTrendsResponse {
-        val safeDays = (days ?: 180).coerceIn(1, 3650)
+        limit: Int,
+        cursor: String?
+    ): ListScaleHistoryResponse {
+        val safeLimit = limit.coerceIn(1, 50)
+        val cursorId = parseScaleHistoryCursor(cursor)
         return DatabaseFactory.dbQuery {
             requireActiveBindingForDoctor(doctorId, patientUserId)
             val patientRef = EntityID(patientUserId, UsersTable)
-            val startAt = utcNow().minusDays(safeDays.toLong())
-            val sessions = UserScaleSessionsTable.selectAll().where {
-                (UserScaleSessionsTable.userId eq patientRef) and
-                    (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED) and
-                    (UserScaleSessionsTable.submittedAt greaterEq startAt)
-            }.orderBy(UserScaleSessionsTable.submittedAt, SortOrder.ASC).toList()
-            if (sessions.isEmpty()) {
-                return@dbQuery PatientScaleTrendsResponse(patientUserId = patientUserId, series = emptyList())
+            val condition = (UserScaleSessionsTable.userId eq patientRef) and
+                (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED) and
+                if (cursorId != null) (UserScaleSessionsTable.id less cursorId) else (UserScaleSessionsTable.id greater 0L)
+            val rows = UserScaleSessionsTable.selectAll().where {
+                condition
+            }.orderBy(UserScaleSessionsTable.id, SortOrder.DESC).limit(safeLimit + 1).toList()
+            val hasMore = rows.size > safeLimit
+            val page = if (hasMore) rows.take(safeLimit) else rows
+            val scaleById = if (page.isEmpty()) {
+                emptyMap()
+            } else {
+                val scaleRefs = page.map { it[UserScaleSessionsTable.scaleId] }.distinct()
+                ScalesTable.selectAll().where {
+                    ScalesTable.id inList scaleRefs
+                }.associateBy { it[ScalesTable.id].value }
             }
-            val sessionRefs = sessions.map { it[UserScaleSessionsTable.id] }
-            val resultBySessionId = UserScaleResultsTable.selectAll().where {
-                UserScaleResultsTable.sessionId inList sessionRefs
-            }.associateBy { it[UserScaleResultsTable.sessionId].value }
-            val scaleRefs = sessions.map { it[UserScaleSessionsTable.scaleId] }.distinct()
-            val scaleById = ScalesTable.selectAll().where {
-                ScalesTable.id inList scaleRefs
-            }.associateBy { it[ScalesTable.id].value }
-            val series = linkedMapOf<String, MutableList<PatientScaleTrendPoint>>()
-            val nameByCode = linkedMapOf<String, String>()
-            sessions.forEach { session ->
-                val submittedAt = session[UserScaleSessionsTable.submittedAt] ?: return@forEach
-                val scale = scaleById[session[UserScaleSessionsTable.scaleId].value] ?: return@forEach
-                val scaleCode = scale[ScalesTable.code]
-                val scaleName = scale[ScalesTable.name]
-                val result = resultBySessionId[session[UserScaleSessionsTable.id].value]
-                series.computeIfAbsent(scaleCode) { mutableListOf() }.add(
-                    PatientScaleTrendPoint(
-                        submittedAt = submittedAt.toIsoInstant(),
-                        totalScore = result?.get(UserScaleResultsTable.totalScore)?.toDouble()
-                    )
-                )
-                nameByCode[scaleCode] = scaleName
+            val versionById = if (page.isEmpty()) {
+                emptyMap()
+            } else {
+                val versionRefs = page.map { it[UserScaleSessionsTable.versionId] }.distinct()
+                ScaleVersionsTable.selectAll().where {
+                    ScaleVersionsTable.id inList versionRefs
+                }.associateBy { it[ScaleVersionsTable.id].value }
             }
-            PatientScaleTrendsResponse(
-                patientUserId = patientUserId,
-                series = series.entries.map { (scaleCode, points) ->
-                    PatientScaleTrendSeries(
-                        scaleCode = scaleCode,
-                        scaleName = nameByCode[scaleCode] ?: scaleCode,
-                        points = points
+            val resultBySessionId = if (page.isEmpty()) {
+                emptyMap()
+            } else {
+                UserScaleResultsTable.selectAll().where {
+                    UserScaleResultsTable.sessionId inList page.map { it[UserScaleSessionsTable.id] }
+                }.associateBy { it[UserScaleResultsTable.sessionId].value }
+            }
+
+            ListScaleHistoryResponse(
+                items = page.map { row ->
+                    val sessionId = row[UserScaleSessionsTable.id].value
+                    val scale = scaleById[row[UserScaleSessionsTable.scaleId].value]
+                        ?: throw doctorInvalidArg("Scale not found for session=$sessionId")
+                    val version = versionById[row[UserScaleSessionsTable.versionId].value]
+                        ?: throw doctorInvalidArg("Version not found for session=$sessionId")
+                    val result = resultBySessionId[sessionId]
+                    ScaleHistoryItem(
+                        sessionId = sessionId,
+                        scaleId = scale[ScalesTable.id].value,
+                        scaleCode = scale[ScalesTable.code],
+                        scaleName = scale[ScalesTable.name],
+                        versionId = version[ScaleVersionsTable.id].value,
+                        version = version[ScaleVersionsTable.version],
+                        progress = row[UserScaleSessionsTable.progress],
+                        totalScore = result?.get(UserScaleResultsTable.totalScore)?.toDouble(),
+                        submittedAt = row[UserScaleSessionsTable.submittedAt]?.toIsoInstant(),
+                        updatedAt = row[UserScaleSessionsTable.updatedAt].toIsoInstant()
                     )
-                }
+                },
+                nextCursor = if (hasMore) page.last()[UserScaleSessionsTable.id].value.toString() else null
             )
         }
     }
 
-    suspend fun listPatientScaleAnswerRecords(
+    suspend fun getPatientScaleSessionResult(
         doctorId: Long,
         patientUserId: Long,
-        limit: Int,
-        cursor: Long?
-    ): DoctorPatientScaleAnswerRecordListResponse {
-        val safeLimit = limit.coerceIn(1, 100)
+        sessionId: Long
+    ): ScaleResultResponse {
         return DatabaseFactory.dbQuery {
             requireActiveBindingForDoctor(doctorId, patientUserId)
-            val patientRef = EntityID(patientUserId, UsersTable)
-            val joined = UserScaleAnswerRecordsTable.innerJoin(UserScaleSessionsTable)
-            var condition: Op<Boolean> = UserScaleSessionsTable.userId eq patientRef
-            if (cursor != null) {
-                condition = condition and (UserScaleAnswerRecordsTable.id less cursor)
+            val sessionRef = EntityID(sessionId, UserScaleSessionsTable)
+            val sessionRow = UserScaleSessionsTable.selectAll().where {
+                UserScaleSessionsTable.id eq sessionRef
+            }.firstOrNull() ?: throw AppException(
+                code = ErrorCodes.SCALE_SESSION_NOT_FOUND,
+                message = "Scale session not found",
+                status = HttpStatusCode.NotFound
+            )
+            if (sessionRow[UserScaleSessionsTable.userId].value != patientUserId) {
+                throw doctorForbidden("Scale session does not belong to current patient")
             }
-            val rows = joined.selectAll().where {
-                condition
-            }.orderBy(UserScaleAnswerRecordsTable.id, SortOrder.DESC).limit(safeLimit + 1).toList()
-            val hasMore = rows.size > safeLimit
-            val page = if (hasMore) rows.take(safeLimit) else rows
-            if (page.isEmpty()) {
-                return@dbQuery DoctorPatientScaleAnswerRecordListResponse(
-                    patientUserId = patientUserId,
-                    items = emptyList(),
-                    nextCursor = null
-                )
+            val resultRow = UserScaleResultsTable.selectAll().where {
+                UserScaleResultsTable.sessionId eq sessionRef
+            }.firstOrNull() ?: throw AppException(
+                code = ErrorCodes.SCALE_INVALID_ARGUMENT,
+                message = "Result not ready",
+                status = HttpStatusCode.Conflict
+            )
+            val bandCode = resultRow[UserScaleResultsTable.bandLevelCode]
+            val bandRow = if (bandCode.isNullOrBlank()) {
+                null
+            } else {
+                ScaleResultBandsTable.selectAll().where {
+                    (ScaleResultBandsTable.versionId eq sessionRow[UserScaleSessionsTable.versionId]) and
+                        (ScaleResultBandsTable.levelCode eq bandCode)
+                }.orderBy(ScaleResultBandsTable.minScore, SortOrder.ASC).limit(1).firstOrNull()
             }
-
-            val scaleRefs = page.map { it[UserScaleSessionsTable.scaleId] }.distinct()
-            val scaleById = ScalesTable.selectAll().where {
-                ScalesTable.id inList scaleRefs
-            }.associateBy { it[ScalesTable.id] }
-            val questionRefs = page.map { it[UserScaleAnswerRecordsTable.questionId] }.distinct()
-            val questionById = ScaleQuestionsTable.selectAll().where {
-                ScaleQuestionsTable.id inList questionRefs
-            }.associateBy { it[ScaleQuestionsTable.id] }
-
-            DoctorPatientScaleAnswerRecordListResponse(
-                patientUserId = patientUserId,
-                items = page.map { row ->
-                    val scale = scaleById[row[UserScaleSessionsTable.scaleId]]
-                    val question = questionById[row[UserScaleAnswerRecordsTable.questionId]]
-                    DoctorPatientScaleAnswerRecordItem(
-                        recordId = row[UserScaleAnswerRecordsTable.id].value,
-                        sessionId = row[UserScaleSessionsTable.id].value,
-                        scaleId = row[UserScaleSessionsTable.scaleId].value,
-                        scaleCode = scale?.get(ScalesTable.code) ?: "",
-                        scaleName = scale?.get(ScalesTable.name) ?: "",
-                        versionId = row[UserScaleSessionsTable.versionId].value,
-                        sessionStatus = row[UserScaleSessionsTable.status].name,
-                        sessionSubmittedAt = row[UserScaleSessionsTable.submittedAt]?.toIsoInstant(),
-                        questionId = row[UserScaleAnswerRecordsTable.questionId].value,
-                        questionKey = question?.get(ScaleQuestionsTable.questionKey) ?: "",
-                        questionOrderNo = question?.get(ScaleQuestionsTable.orderNo) ?: 0,
-                        questionStem = question?.get(ScaleQuestionsTable.stem) ?: "",
-                        rawAnswer = parseJsonElementOrRaw(row[UserScaleAnswerRecordsTable.rawAnswerJson]),
-                        normalizedAnswer = parseJsonElementOrRaw(row[UserScaleAnswerRecordsTable.normalizedAnswerJson]),
-                        numericScore = row[UserScaleAnswerRecordsTable.numericScore]?.toDouble(),
-                        answeredAt = row[UserScaleAnswerRecordsTable.answeredAt].toIsoInstant()
-                    )
-                },
-                nextCursor = if (hasMore) page.last()[UserScaleAnswerRecordsTable.id].value.toString() else null
+            val dimensionScores = parseDoubleMap(parseDoctorJsonOrNull(resultRow[UserScaleResultsTable.dimensionScoresJson]))
+            val resultDetail = parseDoctorJsonOrNull(resultRow[UserScaleResultsTable.resultDetailJson]) as? JsonObject
+            val overallMetrics = parseDoubleMap(resultDetail?.get("overallMetrics"))
+            val dimensionResults = parseDimensionResultList(resultDetail?.get("dimensionResults"))
+            val resultFlags = parseStringList(resultDetail?.get("resultFlags"))
+            ScaleResultResponse(
+                sessionId = sessionId,
+                totalScore = resultRow[UserScaleResultsTable.totalScore]?.toDouble(),
+                dimensionScores = dimensionScores,
+                overallMetrics = overallMetrics,
+                dimensionResults = dimensionResults,
+                resultFlags = resultFlags,
+                bandLevelCode = bandCode,
+                bandLevelName = bandRow?.get(ScaleResultBandsTable.levelName),
+                resultText = resultRow[UserScaleResultsTable.resultText] ?: bandRow?.get(ScaleResultBandsTable.interpretation),
+                computedAt = resultRow[UserScaleResultsTable.computedAt].toIsoInstant()
             )
         }
     }
@@ -903,10 +908,6 @@ $templateReport
 """.trimIndent()
     }
 
-    private fun parseJsonElementOrRaw(raw: String): JsonElement {
-        return runCatching { deps.json.parseToJsonElement(raw) }.getOrElse { JsonPrimitive(raw) }
-    }
-
     private fun compareEntries(
         left: PatientListEntry,
         right: PatientListEntry,
@@ -962,6 +963,58 @@ $templateReport
     private fun parseCursorSnapshotAt(raw: String): LocalDateTime {
         return runCatching { parseInstantToUtcDateTime(raw) }
             .getOrElse { throw doctorCursorInvalid("Invalid cursor snapshotAt") }
+    }
+
+    private fun parseScaleHistoryCursor(raw: String?): Long? {
+        if (raw.isNullOrBlank()) {
+            return null
+        }
+        return raw.toLongOrNull()?.takeIf { it > 0L } ?: throw doctorInvalidArg("cursor must be a valid positive long value")
+    }
+
+    private fun parseDoctorJsonOrNull(raw: String?): JsonElement? {
+        if (raw.isNullOrBlank()) {
+            return null
+        }
+        return runCatching { deps.json.parseToJsonElement(raw) }.getOrNull()
+    }
+
+    private fun parseDoubleMap(element: JsonElement?): Map<String, Double> {
+        val obj = element as? JsonObject ?: return emptyMap()
+        return obj.entries.mapNotNull { (k, v) ->
+            val primitive = v as? JsonPrimitive ?: return@mapNotNull null
+            val value = primitive.doubleOrNull ?: return@mapNotNull null
+            k to value
+        }.toMap()
+    }
+
+    private fun parseStringList(element: JsonElement?): List<String> {
+        val arr = element as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { item ->
+            val primitive = item as? JsonPrimitive ?: return@mapNotNull null
+            primitive.content.trim().takeIf { it.isNotEmpty() }
+        }
+    }
+
+    private fun parseDimensionResultList(element: JsonElement?): List<ScaleDimensionResult> {
+        val arr = element as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { item ->
+            val obj = item as? JsonObject ?: return@mapNotNull null
+            val dimensionKey = (obj["dimensionKey"] as? JsonPrimitive)?.content?.trim()?.takeIf { it.isNotEmpty() }
+                ?: return@mapNotNull null
+            val extraMetrics = parseDoubleMap(obj["extraMetrics"])
+            ScaleDimensionResult(
+                dimensionKey = dimensionKey,
+                dimensionName = (obj["dimensionName"] as? JsonPrimitive)?.content?.trim()?.takeIf { it.isNotEmpty() },
+                rawScore = (obj["rawScore"] as? JsonPrimitive)?.doubleOrNull,
+                averageScore = (obj["averageScore"] as? JsonPrimitive)?.doubleOrNull,
+                standardScore = (obj["standardScore"] as? JsonPrimitive)?.doubleOrNull,
+                levelCode = (obj["levelCode"] as? JsonPrimitive)?.content?.trim()?.takeIf { it.isNotEmpty() },
+                levelName = (obj["levelName"] as? JsonPrimitive)?.content?.trim()?.takeIf { it.isNotEmpty() },
+                interpretation = (obj["interpretation"] as? JsonPrimitive)?.content?.trim()?.takeIf { it.isNotEmpty() },
+                extraMetrics = extraMetrics
+            )
+        }
     }
 
     private fun computeFilterHash(
