@@ -1,5 +1,6 @@
 package me.hztcm.mindisle.doctor.api
 
+import io.ktor.client.call.body
 import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.put
@@ -7,6 +8,7 @@ import io.ktor.client.request.setBody
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
@@ -19,15 +21,17 @@ import io.mockk.coEvery
 import io.mockk.mockk
 import me.hztcm.mindisle.common.configureStatusPages
 import me.hztcm.mindisle.config.AppConfig
+import me.hztcm.mindisle.doctor.service.DoctorPatientsExportResult
 import me.hztcm.mindisle.doctor.service.DoctorService
 import me.hztcm.mindisle.model.DoctorPatientDiagnosisStateResponse
 import me.hztcm.mindisle.model.DoctorPatientGroupItem
 import me.hztcm.mindisle.model.DoctorPatientGroupListResponse
 import me.hztcm.mindisle.model.DoctorPatientListResponse
 import me.hztcm.mindisle.model.DoctorPatientProfileResponse
-import me.hztcm.mindisle.model.DoctorPatientScaleAnswerRecordItem
-import me.hztcm.mindisle.model.DoctorPatientScaleAnswerRecordListResponse
 import me.hztcm.mindisle.model.DoctorProfileResponse
+import me.hztcm.mindisle.model.ListScaleHistoryResponse
+import me.hztcm.mindisle.model.ScaleHistoryItem
+import me.hztcm.mindisle.model.ScaleResultResponse
 import me.hztcm.mindisle.security.JwtService
 import me.hztcm.mindisle.security.configureAuth
 import kotlin.test.Test
@@ -35,6 +39,39 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class DoctorRoutesContractTest {
+    @Test
+    fun `GET doctors me patients export returns zip attachment`() = testApplication {
+        val service = mockk<DoctorService>()
+        val jwtService = JwtService(AppConfig.auth)
+        val (doctorAccessToken, _) = jwtService.generateDoctorAccessToken(doctorId = 1L, deviceId = "test-device")
+        coEvery { service.exportDoctorPatients(doctorId = 1L) } returns DoctorPatientsExportResult(
+            fileName = "doctor-1-patients-export-20260329123000.zip",
+            zipBytes = byteArrayOf(0x50, 0x4B, 0x03, 0x04)
+        )
+
+        application {
+            installDoctorRouteTestApp(service, jwtService)
+        }
+
+        val response = client.get("/doctors/me/patients/export") {
+            bearerAuth(doctorAccessToken)
+        }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(
+            (response.headers[HttpHeaders.ContentType] ?: "").startsWith("application/zip"),
+            response.headers.toString()
+        )
+        assertEquals(
+            "attachment; filename=\"doctor-1-patients-export-20260329123000.zip\"",
+            response.headers[HttpHeaders.ContentDisposition]
+        )
+        val bytes = response.body<ByteArray>()
+        assertEquals(4, bytes.size)
+        assertEquals(0x50.toByte(), bytes[0])
+        assertEquals(0x4B.toByte(), bytes[1])
+    }
+
     @Test
     fun `PUT doctors me profile is handled instead of 405`() = testApplication {
         val service = mockk<DoctorService>()
@@ -281,44 +318,30 @@ class DoctorRoutesContractTest {
     }
 
     @Test
-    fun `GET doctors patient scale answer records returns paged result`() = testApplication {
+    fun `GET doctors patient scale history returns paged result`() = testApplication {
         val service = mockk<DoctorService>()
         val jwtService = JwtService(AppConfig.auth)
         val (doctorAccessToken, _) = jwtService.generateDoctorAccessToken(doctorId = 1L, deviceId = "test-device")
         coEvery {
-            service.listPatientScaleAnswerRecords(
+            service.listPatientScaleHistory(
                 doctorId = 1L,
                 patientUserId = 2L,
                 limit = 20,
                 cursor = null
             )
-        } returns DoctorPatientScaleAnswerRecordListResponse(
-            patientUserId = 2L,
+        } returns ListScaleHistoryResponse(
             items = listOf(
-                DoctorPatientScaleAnswerRecordItem(
-                    recordId = 1001L,
+                ScaleHistoryItem(
                     sessionId = 201L,
                     scaleId = 3L,
                     scaleCode = "SCL90",
                     scaleName = "症状自评量表（SCL-90）",
                     versionId = 301L,
-                    sessionStatus = "SUBMITTED",
-                    sessionSubmittedAt = "2026-03-20T10:00:00Z",
-                    questionId = 401L,
-                    questionKey = "Q1",
-                    questionOrderNo = 1,
-                    questionStem = "头痛",
-                    rawAnswer = kotlinx.serialization.json.JsonObject(
-                        mapOf("optionId" to kotlinx.serialization.json.JsonPrimitive(1))
-                    ),
-                    normalizedAnswer = kotlinx.serialization.json.JsonObject(
-                        mapOf(
-                            "optionId" to kotlinx.serialization.json.JsonPrimitive(1),
-                            "optionKey" to kotlinx.serialization.json.JsonPrimitive("opt_1")
-                        )
-                    ),
-                    numericScore = 1.0,
-                    answeredAt = "2026-03-20T09:50:00Z"
+                    version = 7,
+                    progress = 100,
+                    totalScore = 1.0,
+                    submittedAt = "2026-03-20T10:00:00Z",
+                    updatedAt = "2026-03-20T10:00:00Z"
                 )
             ),
             nextCursor = "1000"
@@ -328,14 +351,71 @@ class DoctorRoutesContractTest {
             installDoctorRouteTestApp(service, jwtService)
         }
 
-        val response = client.get("/doctors/me/patients/2/scale-answer-records") {
+        val response = client.get("/doctors/me/patients/2/scale-history") {
             bearerAuth(doctorAccessToken)
         }
         val body = response.bodyAsText()
 
         assertEquals(HttpStatusCode.OK, response.status)
-        assertTrue(body.contains("\"recordId\":1001"), body)
+        assertTrue(body.contains("\"sessionId\":201"), body)
+        assertTrue(body.contains("\"scaleCode\":\"SCL90\""), body)
         assertTrue(body.contains("\"nextCursor\":\"1000\""), body)
+    }
+
+    @Test
+    fun `GET doctors patient scale session result returns scale result`() = testApplication {
+        val service = mockk<DoctorService>()
+        val jwtService = JwtService(AppConfig.auth)
+        val (doctorAccessToken, _) = jwtService.generateDoctorAccessToken(doctorId = 1L, deviceId = "test-device")
+        coEvery {
+            service.getPatientScaleSessionResult(
+                doctorId = 1L,
+                patientUserId = 2L,
+                sessionId = 201L
+            )
+        } returns ScaleResultResponse(
+            sessionId = 201L,
+            totalScore = 143.0,
+            dimensionScores = mapOf("somatization" to 12.0),
+            overallMetrics = mapOf("meanScore" to 1.59),
+            dimensionResults = emptyList(),
+            resultFlags = listOf("ABNORMAL"),
+            bandLevelCode = "MILD",
+            bandLevelName = "轻度",
+            resultText = "存在轻度异常，建议随访",
+            computedAt = "2026-03-20T10:00:00Z"
+        )
+
+        application {
+            installDoctorRouteTestApp(service, jwtService)
+        }
+
+        val response = client.get("/doctors/me/patients/2/scales/sessions/201/result") {
+            bearerAuth(doctorAccessToken)
+        }
+        val body = response.bodyAsText()
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(body.contains("\"sessionId\":201"), body)
+        assertTrue(body.contains("\"totalScore\":143.0"), body)
+        assertTrue(body.contains("\"bandLevelCode\":\"MILD\""), body)
+    }
+
+    @Test
+    fun `GET doctors patient scale answer records returns 404 after route removal`() = testApplication {
+        val service = mockk<DoctorService>()
+        val jwtService = JwtService(AppConfig.auth)
+        val (doctorAccessToken, _) = jwtService.generateDoctorAccessToken(doctorId = 1L, deviceId = "test-device")
+
+        application {
+            installDoctorRouteTestApp(service, jwtService)
+        }
+
+        val response = client.get("/doctors/me/patients/2/scale-answer-records") {
+            bearerAuth(doctorAccessToken)
+        }
+
+        assertEquals(HttpStatusCode.NotFound, response.status)
     }
 }
 

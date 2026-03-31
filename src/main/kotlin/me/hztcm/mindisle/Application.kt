@@ -38,7 +38,8 @@ fun Application.module() {
     install(ContentNegotiation) {
         json(
             Json {
-                prettyPrint = DEBUG
+                // Keep payload compact for large responses such as scale details.
+                prettyPrint = false
                 isLenient = true
                 ignoreUnknownKeys = true
             }

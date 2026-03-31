@@ -1,10 +1,12 @@
 package me.hztcm.mindisle.doctor.service
 
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import me.hztcm.mindisle.db.DatabaseFactory
 import me.hztcm.mindisle.db.DoctorPatientBindingStatus
 import me.hztcm.mindisle.db.DoctorPatientBindingsTable
 import me.hztcm.mindisle.db.DoctorsTable
+import me.hztcm.mindisle.db.ScaleOptionsTable
 import me.hztcm.mindisle.db.ScaleQuestionsTable
 import me.hztcm.mindisle.db.ScaleSessionStatus
 import me.hztcm.mindisle.db.ScalesTable
@@ -17,6 +19,13 @@ import me.hztcm.mindisle.db.UserScaleSessionsTable
 import me.hztcm.mindisle.db.UserWeightLogsTable
 import me.hztcm.mindisle.db.UsersTable
 import me.hztcm.mindisle.model.Gender
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.longOrNull
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
@@ -300,6 +309,25 @@ internal class DoctorExportDomainService(private val deps: DoctorServiceDeps) {
                 ScaleQuestionsTable.id inList questionRefs
             }.associateBy { it[ScaleQuestionsTable.id].value }
         }
+        val optionRowsByQuestionId = if (questionRefs.isEmpty()) {
+            emptyMap()
+        } else {
+            ScaleOptionsTable.selectAll().where {
+                ScaleOptionsTable.questionId inList questionRefs
+            }.orderBy(ScaleOptionsTable.orderNo, SortOrder.ASC)
+                .toList()
+                .groupBy { it[ScaleOptionsTable.questionId].value }
+        }
+        val optionLabelByQuestionIdAndOptionId = optionRowsByQuestionId.mapValues { (_, rows) ->
+            rows.associate { row ->
+                row[ScaleOptionsTable.id].value to row[ScaleOptionsTable.label]
+            }
+        }
+        val optionLabelByQuestionIdAndOptionKey = optionRowsByQuestionId.mapValues { (_, rows) ->
+            rows.associate { row ->
+                row[ScaleOptionsTable.optionKey] to row[ScaleOptionsTable.label]
+            }
+        }
 
         val scaleRefs = sessions.map { it[UserScaleSessionsTable.scaleId] }.distinct()
         val scaleById = if (scaleRefs.isEmpty()) {
@@ -333,13 +361,19 @@ internal class DoctorExportDomainService(private val deps: DoctorServiceDeps) {
                         "$normalizedScaleCode-Q$questionId"
                     }
                     val answerDate = (sessionSubmittedAt ?: answer[UserScaleAnswerRecordsTable.answeredAt]).toIsoOffsetPlus8()
+                    val enrichedRawAnswerJson = enrichRawAnswerJsonForExport(
+                        rawAnswerJson = answer[UserScaleAnswerRecordsTable.rawAnswerJson],
+                        optionLabelById = optionLabelByQuestionIdAndOptionId[questionId].orEmpty(),
+                        optionLabelByKey = optionLabelByQuestionIdAndOptionKey[questionId].orEmpty(),
+                        json = deps.json
+                    )
                     listOf(
                         session[UserScaleSessionsTable.userId].value.toString(),
                         sessionId.toString(),
                         rawScaleCode,
                         scaleRow?.get(ScalesTable.name).orEmpty(),
                         questionIdentifier,
-                        answer[UserScaleAnswerRecordsTable.rawAnswerJson],
+                        enrichedRawAnswerJson,
                         answerDate
                     )
                 }
@@ -376,6 +410,17 @@ internal fun normalizeScaleCodeForExport(scaleCode: String): String {
     }
 }
 
+internal fun enrichRawAnswerJsonForExport(
+    rawAnswerJson: String,
+    optionLabelById: Map<Long, String>,
+    optionLabelByKey: Map<String, String>,
+    json: Json = Json
+): String {
+    val rawElement = runCatching { json.parseToJsonElement(rawAnswerJson) }.getOrNull() ?: return rawAnswerJson
+    val enriched = enrichRawAnswerElement(rawElement, optionLabelById, optionLabelByKey)
+    return json.encodeToString(JsonElement.serializer(), enriched)
+}
+
 internal fun buildCsvBytes(headers: List<String>, rows: List<List<String>>): ByteArray {
     val builder = StringBuilder()
     builder.append(headers.joinToString(",") { escapeCsvCell(it) }).append(CSV_NEWLINE)
@@ -389,6 +434,76 @@ internal fun buildCsvBytes(headers: List<String>, rows: List<List<String>>): Byt
     }
     val csvBytes = builder.toString().toByteArray(StandardCharsets.UTF_8)
     return prependUtf8Bom(csvBytes)
+}
+
+private fun enrichRawAnswerElement(
+    element: JsonElement,
+    optionLabelById: Map<Long, String>,
+    optionLabelByKey: Map<String, String>
+): JsonElement {
+    return when (element) {
+        is JsonObject -> {
+            val mapped = linkedMapOf<String, JsonElement>()
+            element.forEach { (key, value) ->
+                when (key) {
+                    "optionId" -> {
+                        mapped[key] = value
+                        val optionId = (value as? JsonPrimitive)?.longOrNull
+                        val label = optionId?.let { optionLabelById[it] }
+                        if (label != null) {
+                            mapped["optionLabel"] = JsonPrimitive(label)
+                        }
+                    }
+
+                    "optionIds" -> {
+                        mapped[key] = value
+                        val ids = (value as? JsonArray)?.mapNotNull { item ->
+                            (item as? JsonPrimitive)?.longOrNull
+                        }.orEmpty()
+                        val labels = ids.mapNotNull { optionLabelById[it] }
+                        if (labels.isNotEmpty()) {
+                            mapped["optionLabels"] = buildJsonArray {
+                                labels.forEach { label -> add(JsonPrimitive(label)) }
+                            }
+                        }
+                    }
+
+                    "optionKey" -> {
+                        mapped[key] = value
+                        val optionKey = (value as? JsonPrimitive)?.content?.trim()?.takeIf { it.isNotEmpty() }
+                        val label = optionKey?.let { optionLabelByKey[it] }
+                        if (label != null) {
+                            mapped["optionLabel"] = JsonPrimitive(label)
+                        }
+                    }
+
+                    "optionKeys" -> {
+                        mapped[key] = value
+                        val keys = (value as? JsonArray)?.mapNotNull { item ->
+                            (item as? JsonPrimitive)?.content?.trim()?.takeIf { keyText -> keyText.isNotEmpty() }
+                        }.orEmpty()
+                        val labels = keys.mapNotNull { optionLabelByKey[it] }
+                        if (labels.isNotEmpty()) {
+                            mapped["optionLabels"] = buildJsonArray {
+                                labels.forEach { label -> add(JsonPrimitive(label)) }
+                            }
+                        }
+                    }
+
+                    else -> {
+                        mapped[key] = enrichRawAnswerElement(value, optionLabelById, optionLabelByKey)
+                    }
+                }
+            }
+            JsonObject(mapped)
+        }
+
+        is JsonArray -> JsonArray(element.map { item ->
+            enrichRawAnswerElement(item, optionLabelById, optionLabelByKey)
+        })
+
+        else -> element
+    }
 }
 
 internal fun escapeCsvCell(value: String?): String {

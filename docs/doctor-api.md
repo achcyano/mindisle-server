@@ -184,7 +184,7 @@ Base URL: `/api/v1`
      - `patients.csv`：患者基本信息（id、手机号、姓名、性别、出生日期、既往史、是否使用中药、身高、腰围、疾病史）
      - `weight_logs.csv`：体重变化（记录日期、体重、来源）
      - `medications.csv`：用药全字段（包含 `deletedAt` 非空的历史删除记录）
-     - `scale_answers.csv`：量表作答（仅 `SUBMITTED` 会话；每个 `sessionId + questionId` 取最终一条原始答案；题目标识格式如 `SCL-90-1`）
+    - `scale_answers.csv`：量表作答（仅 `SUBMITTED` 会话；每个 `sessionId + questionId` 取最终一条原始答案；题目标识格式如 `SCL-90-1`；若答案含 `optionId/optionIds/optionKey/optionKeys`，会自动补充 `optionLabel/optionLabels`）
 7. `PUT /doctors/me/patients/{patientUserId}/grouping`
    - 入参：`severityGroup?`
    - 若请求体包含 `treatmentPhase`，返回 `40046 DOCTOR_FEATURE_NOT_SUPPORTED`
