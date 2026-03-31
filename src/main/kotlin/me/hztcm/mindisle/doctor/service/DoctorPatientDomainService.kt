@@ -127,10 +127,39 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                     DoctorPatientBindingsTable.unboundAt.isNull() and
                     (DoctorPatientBindingsTable.updatedAt lessEq snapshotAt)
             }.toList()
+            val patientRefs = bindings.map { it[DoctorPatientBindingsTable.patientUserId] }.distinct()
+            val usersById = if (patientRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                UsersTable.selectAll().where {
+                    UsersTable.id inList patientRefs
+                }.associateBy { it[UsersTable.id].value }
+            }
+            val profilesByUserId = if (patientRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                UserProfilesTable.selectAll().where {
+                    UserProfilesTable.userId inList patientRefs
+                }.associateBy { it[UserProfilesTable.userId].value }
+            }
+            val metricSnapshotByUserId = loadLatestMetricSnapshotsByPatient(
+                patientRefs = patientRefs,
+                scaleCodeByScaleId = scaleCodeById,
+                snapshotAt = snapshotAt
+            )
+            val latestAssessmentByUserId = loadLatestAssessmentSubmittedAtByPatient(
+                patientRefs = patientRefs,
+                snapshotAt = snapshotAt
+            )
+            val emptyMetricSnapshot = MetricSnapshotResult(
+                metrics = PatientMetricSnapshot(adherence = null),
+                lastSubmittedAt = null
+            )
             val entries = bindings.mapNotNull { binding ->
                 val userRef = binding[DoctorPatientBindingsTable.patientUserId]
-                val userRow = UsersTable.selectAll().where { UsersTable.id eq userRef }.firstOrNull() ?: return@mapNotNull null
-                val profileRow = UserProfilesTable.selectAll().where { UserProfilesTable.userId eq userRef }.firstOrNull()
+                val userId = userRef.value
+                val userRow = usersById[userId] ?: return@mapNotNull null
+                val profileRow = profilesByUserId[userId]
                 val fullName = profileRow?.get(UserProfilesTable.fullName)
                 if (!keywordMatched(normalizedKeyword, userRow[UsersTable.phone], fullName)) return@mapNotNull null
                 val gender = profileRow?.get(UserProfilesTable.gender) ?: Gender.UNKNOWN
@@ -138,11 +167,11 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                 val severityGroup = binding[DoctorPatientBindingsTable.severityGroup]
                 if (normalizedSeverityGroup != null && severityGroup != normalizedSeverityGroup) return@mapNotNull null
                 val diagnosis = binding[DoctorPatientBindingsTable.diagnosis]
-                val metricSnapshot = loadLatestMetricSnapshot(userRef, scaleCodeById, snapshotAt)
+                val metricSnapshot = metricSnapshotByUserId[userId] ?: emptyMetricSnapshot
                 val latestScl90Score = metricSnapshot.metrics.scl90Total
                 if (query.scl90ScoreMin != null && (latestScl90Score == null || latestScl90Score < query.scl90ScoreMin)) return@mapNotNull null
                 if (query.scl90ScoreMax != null && (latestScl90Score == null || latestScl90Score > query.scl90ScoreMax)) return@mapNotNull null
-                val latestAssessmentAt = loadLatestAssessmentSubmittedAt(userRef, snapshotAt)
+                val latestAssessmentAt = latestAssessmentByUserId[userId]
                 val reasons = collectAbnormalReasons(metricSnapshot.metrics, thresholds)
                 val abnormal = reasons.isNotEmpty()
                 if (query.abnormalOnly && !abnormal) return@mapNotNull null
@@ -744,66 +773,129 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         scaleCodeByScaleId: Map<Long, String>,
         snapshotAt: LocalDateTime
     ): MetricSnapshotResult {
-        if (scaleCodeByScaleId.isEmpty()) {
-            return MetricSnapshotResult(metrics = PatientMetricSnapshot(adherence = null), lastSubmittedAt = null)
-        }
-        val scaleRefs = scaleCodeByScaleId.keys.map { EntityID(it, ScalesTable) }
-        val sessions = UserScaleSessionsTable.selectAll().where {
-            (UserScaleSessionsTable.userId eq patientRef) and
-                (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED) and
-                (UserScaleSessionsTable.scaleId inList scaleRefs) and
-                (UserScaleSessionsTable.submittedAt lessEq snapshotAt)
-        }.orderBy(UserScaleSessionsTable.submittedAt, SortOrder.DESC).toList()
-        if (sessions.isEmpty()) {
-            return MetricSnapshotResult(metrics = PatientMetricSnapshot(adherence = null), lastSubmittedAt = null)
-        }
-        val latestSessionByScaleId = linkedMapOf<Long, ResultRow>()
-        sessions.forEach { session ->
-            latestSessionByScaleId.putIfAbsent(session[UserScaleSessionsTable.scaleId].value, session)
-        }
-        val sessionRefs = latestSessionByScaleId.values.map { it[UserScaleSessionsTable.id] }
-        val resultBySessionId = UserScaleResultsTable.selectAll().where {
-            UserScaleResultsTable.sessionId inList sessionRefs
-        }.associateBy { it[UserScaleResultsTable.sessionId].value }
-        var scl90: Double? = null
-        var phq9: Double? = null
-        var gad7: Double? = null
-        var psqi: Double? = null
-        latestSessionByScaleId.forEach { (scaleId, session) ->
-            val code = scaleCodeByScaleId[scaleId] ?: return@forEach
-            val score = resultBySessionId[session[UserScaleSessionsTable.id].value]?.get(UserScaleResultsTable.totalScore)?.toDouble()
-            when (code) {
-                "SCL90" -> scl90 = score
-                "PHQ9" -> phq9 = score
-                "GAD7" -> gad7 = score
-                "PSQI" -> psqi = score
-            }
-        }
-        val lastSubmittedAt = sessions.mapNotNull { it[UserScaleSessionsTable.submittedAt] }.maxOrNull()
-        return MetricSnapshotResult(
-            metrics = PatientMetricSnapshot(
-                scl90Total = scl90,
-                phq9Total = phq9,
-                gad7Total = gad7,
-                psqiTotal = psqi,
-                adherence = null
-            ),
-            lastSubmittedAt = lastSubmittedAt
-        )
+        return loadLatestMetricSnapshotsByPatient(
+            patientRefs = listOf(patientRef),
+            scaleCodeByScaleId = scaleCodeByScaleId,
+            snapshotAt = snapshotAt
+        )[patientRef.value]
+            ?: MetricSnapshotResult(metrics = PatientMetricSnapshot(adherence = null), lastSubmittedAt = null)
     }
 
     private fun org.jetbrains.exposed.sql.Transaction.loadLatestAssessmentSubmittedAt(
         patientRef: EntityID<Long>,
         snapshotAt: LocalDateTime
     ): LocalDateTime? {
-        return UserScaleSessionsTable.selectAll().where {
-            (UserScaleSessionsTable.userId eq patientRef) and
+        return loadLatestAssessmentSubmittedAtByPatient(
+            patientRefs = listOf(patientRef),
+            snapshotAt = snapshotAt
+        )[patientRef.value]
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.loadLatestMetricSnapshotsByPatient(
+        patientRefs: List<EntityID<Long>>,
+        scaleCodeByScaleId: Map<Long, String>,
+        snapshotAt: LocalDateTime
+    ): Map<Long, MetricSnapshotResult> {
+        if (patientRefs.isEmpty()) {
+            return emptyMap()
+        }
+        if (scaleCodeByScaleId.isEmpty()) {
+            return patientRefs.associate { patientRef ->
+                patientRef.value to MetricSnapshotResult(
+                    metrics = PatientMetricSnapshot(adherence = null),
+                    lastSubmittedAt = null
+                )
+            }
+        }
+        val trackedScaleRefs = scaleCodeByScaleId.keys.map { EntityID(it, ScalesTable) }
+        val sessions = UserScaleSessionsTable.selectAll().where {
+            (UserScaleSessionsTable.userId inList patientRefs) and
+                (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED) and
+                (UserScaleSessionsTable.scaleId inList trackedScaleRefs) and
+                (UserScaleSessionsTable.submittedAt lessEq snapshotAt)
+        }.orderBy(UserScaleSessionsTable.userId, SortOrder.ASC)
+            .orderBy(UserScaleSessionsTable.scaleId, SortOrder.ASC)
+            .orderBy(UserScaleSessionsTable.submittedAt, SortOrder.DESC)
+            .orderBy(UserScaleSessionsTable.id, SortOrder.DESC)
+            .toList()
+        if (sessions.isEmpty()) {
+            return patientRefs.associate { patientRef ->
+                patientRef.value to MetricSnapshotResult(
+                    metrics = PatientMetricSnapshot(adherence = null),
+                    lastSubmittedAt = null
+                )
+            }
+        }
+        val latestSessionByPatientScale = linkedMapOf<Pair<Long, Long>, ResultRow>()
+        sessions.forEach { session ->
+            val key = session[UserScaleSessionsTable.userId].value to session[UserScaleSessionsTable.scaleId].value
+            latestSessionByPatientScale.putIfAbsent(key, session)
+        }
+        val latestSessions = latestSessionByPatientScale.values.toList()
+        val resultBySessionId = if (latestSessions.isEmpty()) {
+            emptyMap()
+        } else {
+            UserScaleResultsTable.selectAll().where {
+                UserScaleResultsTable.sessionId inList latestSessions.map { it[UserScaleSessionsTable.id] }
+            }.associateBy { it[UserScaleResultsTable.sessionId].value }
+        }
+        val scoreByPatientAndCode = mutableMapOf<Long, MutableMap<String, Double?>>()
+        val lastSubmittedAtByPatient = mutableMapOf<Long, LocalDateTime>()
+        latestSessions.forEach { session ->
+            val patientId = session[UserScaleSessionsTable.userId].value
+            val submittedAt = session[UserScaleSessionsTable.submittedAt]
+            if (submittedAt != null) {
+                val currentLastSubmittedAt = lastSubmittedAtByPatient[patientId]
+                if (currentLastSubmittedAt == null || submittedAt.isAfter(currentLastSubmittedAt)) {
+                    lastSubmittedAtByPatient[patientId] = submittedAt
+                }
+            }
+            val scaleCode = scaleCodeByScaleId[session[UserScaleSessionsTable.scaleId].value] ?: return@forEach
+            val score = resultBySessionId[session[UserScaleSessionsTable.id].value]
+                ?.get(UserScaleResultsTable.totalScore)
+                ?.toDouble()
+            scoreByPatientAndCode.getOrPut(patientId) { mutableMapOf() }[scaleCode] = score
+        }
+        return patientRefs.associate { patientRef ->
+            val patientId = patientRef.value
+            val scoreByCode = scoreByPatientAndCode[patientId].orEmpty()
+            patientId to MetricSnapshotResult(
+                metrics = PatientMetricSnapshot(
+                    scl90Total = scoreByCode["SCL90"],
+                    phq9Total = scoreByCode["PHQ9"],
+                    gad7Total = scoreByCode["GAD7"],
+                    psqiTotal = scoreByCode["PSQI"],
+                    adherence = null
+                ),
+                lastSubmittedAt = lastSubmittedAtByPatient[patientId]
+            )
+        }
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.loadLatestAssessmentSubmittedAtByPatient(
+        patientRefs: List<EntityID<Long>>,
+        snapshotAt: LocalDateTime
+    ): Map<Long, LocalDateTime> {
+        if (patientRefs.isEmpty()) {
+            return emptyMap()
+        }
+        val sessions = UserScaleSessionsTable.selectAll().where {
+            (UserScaleSessionsTable.userId inList patientRefs) and
                 (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED) and
                 (UserScaleSessionsTable.submittedAt lessEq snapshotAt)
-        }.orderBy(UserScaleSessionsTable.submittedAt, SortOrder.DESC)
-            .limit(1)
-            .firstOrNull()
-            ?.get(UserScaleSessionsTable.submittedAt)
+        }.orderBy(UserScaleSessionsTable.userId, SortOrder.ASC)
+            .orderBy(UserScaleSessionsTable.submittedAt, SortOrder.DESC)
+            .orderBy(UserScaleSessionsTable.id, SortOrder.DESC)
+            .toList()
+        if (sessions.isEmpty()) {
+            return emptyMap()
+        }
+        val latestSubmittedAtByPatient = mutableMapOf<Long, LocalDateTime>()
+        sessions.forEach { session ->
+            val submittedAt = session[UserScaleSessionsTable.submittedAt] ?: return@forEach
+            latestSubmittedAtByPatient.putIfAbsent(session[UserScaleSessionsTable.userId].value, submittedAt)
+        }
+        return latestSubmittedAtByPatient
     }
 
     private fun org.jetbrains.exposed.sql.Transaction.loadDoctorThresholds(doctorRef: EntityID<Long>): DoctorThresholdSnapshot {

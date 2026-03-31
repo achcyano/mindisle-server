@@ -100,31 +100,35 @@ data class DoctorPatientsExportResult(
     val zipBytes: ByteArray
 )
 
-private data class DoctorExportRows(
+private data class DoctorExportScope(
     val generatedAt: LocalDateTime,
-    val patients: List<List<String>>,
-    val weightLogs: List<List<String>>,
-    val medications: List<List<String>>,
-    val scaleAnswers: List<List<String>>
+    val orderedPatientIds: List<Long>,
+    val patientRefs: List<EntityID<Long>>
 )
 
 internal class DoctorExportDomainService(private val deps: DoctorServiceDeps) {
     suspend fun exportDoctorPatients(doctorId: Long): DoctorPatientsExportResult {
-        val rows = DatabaseFactory.dbQuery { loadExportRows(doctorId) }
-        val files = linkedMapOf(
-            "patients.csv" to buildCsvBytes(PATIENTS_CSV_HEADERS, rows.patients),
-            "weight_logs.csv" to buildCsvBytes(WEIGHT_LOGS_CSV_HEADERS, rows.weightLogs),
-            "medications.csv" to buildCsvBytes(MEDICATIONS_CSV_HEADERS, rows.medications),
-            "scale_answers.csv" to buildCsvBytes(SCALE_ANSWERS_CSV_HEADERS, rows.scaleAnswers)
-        )
-        val fileName = buildExportZipFileName(doctorId, rows.generatedAt)
+        val (generatedAt, zipBytes) = DatabaseFactory.dbQuery { buildExportZipBytes(doctorId) }
+        val fileName = buildExportZipFileName(doctorId, generatedAt)
         return DoctorPatientsExportResult(
             fileName = fileName,
-            zipBytes = buildZipBytes(files)
+            zipBytes = zipBytes
         )
     }
 
-    private fun org.jetbrains.exposed.sql.Transaction.loadExportRows(doctorId: Long): DoctorExportRows {
+    private fun org.jetbrains.exposed.sql.Transaction.buildExportZipBytes(doctorId: Long): Pair<LocalDateTime, ByteArray> {
+        val scope = loadExportScope(doctorId)
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            writePatientsCsv(zip, scope)
+            writeWeightLogsCsv(zip, scope.patientRefs)
+            writeMedicationsCsv(zip, scope.patientRefs)
+            writeScaleAnswersCsv(zip, scope.patientRefs)
+        }
+        return scope.generatedAt to output.toByteArray()
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.loadExportScope(doctorId: Long): DoctorExportScope {
         val doctorRef = EntityID(doctorId, DoctorsTable)
         requireDoctor(doctorRef)
 
@@ -141,242 +145,269 @@ internal class DoctorExportDomainService(private val deps: DoctorServiceDeps) {
         }
         val orderedPatientIds = patientIds.sorted()
         val patientRefs = orderedPatientIds.map { EntityID(it, UsersTable) }
+        return DoctorExportScope(
+            generatedAt = now,
+            orderedPatientIds = orderedPatientIds,
+            patientRefs = patientRefs
+        )
+    }
 
-        val usersById = if (patientRefs.isEmpty()) {
-            emptyMap()
-        } else {
-            UsersTable.selectAll().where {
-                UsersTable.id inList patientRefs
-            }.associateBy { it[UsersTable.id].value }
-        }
+    private fun org.jetbrains.exposed.sql.Transaction.writePatientsCsv(
+        zip: ZipOutputStream,
+        scope: DoctorExportScope
+    ) {
+        zip.writeCsvEntry("patients.csv", PATIENTS_CSV_HEADERS) { writer ->
+            val usersById = if (scope.patientRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                UsersTable.selectAll().where {
+                    UsersTable.id inList scope.patientRefs
+                }.associateBy { it[UsersTable.id].value }
+            }
 
-        val profilesByUserId = if (patientRefs.isEmpty()) {
-            emptyMap()
-        } else {
-            UserProfilesTable.selectAll().where {
-                UserProfilesTable.userId inList patientRefs
-            }.associateBy { it[UserProfilesTable.userId].value }
-        }
+            val profilesByUserId = if (scope.patientRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                UserProfilesTable.selectAll().where {
+                    UserProfilesTable.userId inList scope.patientRefs
+                }.associateBy { it[UserProfilesTable.userId].value }
+            }
 
-        val medicalHistoriesByUserId = if (patientRefs.isEmpty()) {
-            emptyMap()
-        } else {
-            UserMedicalHistoriesTable.selectAll().where {
-                UserMedicalHistoriesTable.userId inList patientRefs
-            }.orderBy(UserMedicalHistoriesTable.createdAt, SortOrder.ASC)
-                .toList()
-                .groupBy { it[UserMedicalHistoriesTable.userId].value }
-                .mapValues { (_, rows) ->
-                    rows.mapNotNull { row ->
-                        row[UserMedicalHistoriesTable.item].trim().takeIf { it.isNotEmpty() }
+            val medicalHistoriesByUserId = if (scope.patientRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                UserMedicalHistoriesTable.selectAll().where {
+                    UserMedicalHistoriesTable.userId inList scope.patientRefs
+                }.orderBy(UserMedicalHistoriesTable.createdAt, SortOrder.ASC)
+                    .toList()
+                    .groupBy { it[UserMedicalHistoriesTable.userId].value }
+                    .mapValues { (_, rows) ->
+                        rows.mapNotNull { row ->
+                            row[UserMedicalHistoriesTable.item].trim().takeIf { it.isNotEmpty() }
+                        }
                     }
-                }
-        }
+            }
 
-        val diseaseHistoriesByUserId = if (patientRefs.isEmpty()) {
-            emptyMap()
-        } else {
-            UserDiseaseHistoriesTable.selectAll().where {
-                UserDiseaseHistoriesTable.userId inList patientRefs
-            }.orderBy(UserDiseaseHistoriesTable.createdAt, SortOrder.ASC)
-                .toList()
-                .groupBy { it[UserDiseaseHistoriesTable.userId].value }
-                .mapValues { (_, rows) ->
-                    rows.mapNotNull { row ->
-                        row[UserDiseaseHistoriesTable.item].trim().takeIf { it.isNotEmpty() }
+            val diseaseHistoriesByUserId = if (scope.patientRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                UserDiseaseHistoriesTable.selectAll().where {
+                    UserDiseaseHistoriesTable.userId inList scope.patientRefs
+                }.orderBy(UserDiseaseHistoriesTable.createdAt, SortOrder.ASC)
+                    .toList()
+                    .groupBy { it[UserDiseaseHistoriesTable.userId].value }
+                    .mapValues { (_, rows) ->
+                        rows.mapNotNull { row ->
+                            row[UserDiseaseHistoriesTable.item].trim().takeIf { it.isNotEmpty() }
+                        }
                     }
-                }
-        }
+            }
 
-        val patientRows = orderedPatientIds.mapNotNull { patientId ->
-            val userRow = usersById[patientId] ?: return@mapNotNull null
-            val profileRow = profilesByUserId[patientId]
-            val medicalHistory = medicalHistoriesByUserId[patientId].orEmpty().joinToString("；")
-            val diseaseHistory = diseaseHistoriesByUserId[patientId].orEmpty().joinToString("；")
-            listOf(
-                patientId.toString(),
-                userRow[UsersTable.phone],
-                profileRow?.get(UserProfilesTable.fullName).orEmpty(),
-                formatGender(profileRow?.get(UserProfilesTable.gender)),
-                profileRow?.get(UserProfilesTable.birthDate)?.toString().orEmpty(),
-                medicalHistory,
-                formatYesNo(profileRow?.get(UserProfilesTable.usesTcm)),
-                formatDecimal(profileRow?.get(UserProfilesTable.heightCm)),
-                formatDecimal(profileRow?.get(UserProfilesTable.waistCm)),
-                diseaseHistory
-            )
+            scope.orderedPatientIds.forEach { patientId ->
+                val userRow = usersById[patientId] ?: return@forEach
+                val profileRow = profilesByUserId[patientId]
+                val medicalHistory = medicalHistoriesByUserId[patientId].orEmpty().joinToString("；")
+                val diseaseHistory = diseaseHistoriesByUserId[patientId].orEmpty().joinToString("；")
+                writer.writeRow(
+                    listOf(
+                        patientId.toString(),
+                        userRow[UsersTable.phone],
+                        profileRow?.get(UserProfilesTable.fullName).orEmpty(),
+                        formatGender(profileRow?.get(UserProfilesTable.gender)),
+                        profileRow?.get(UserProfilesTable.birthDate)?.toString().orEmpty(),
+                        medicalHistory,
+                        formatYesNo(profileRow?.get(UserProfilesTable.usesTcm)),
+                        formatDecimal(profileRow?.get(UserProfilesTable.heightCm)),
+                        formatDecimal(profileRow?.get(UserProfilesTable.waistCm)),
+                        diseaseHistory
+                    )
+                )
+            }
         }
+    }
 
-        val weightRows = if (patientRefs.isEmpty()) {
-            emptyList()
-        } else {
+    private fun org.jetbrains.exposed.sql.Transaction.writeWeightLogsCsv(
+        zip: ZipOutputStream,
+        patientRefs: List<EntityID<Long>>
+    ) {
+        zip.writeCsvEntry("weight_logs.csv", WEIGHT_LOGS_CSV_HEADERS) { writer ->
+            if (patientRefs.isEmpty()) {
+                return@writeCsvEntry
+            }
+
             UserWeightLogsTable.selectAll().where {
                 UserWeightLogsTable.userId inList patientRefs
             }.orderBy(UserWeightLogsTable.userId, SortOrder.ASC)
                 .orderBy(UserWeightLogsTable.recordedAt, SortOrder.ASC)
-                .toList()
-                .map { row ->
-                    listOf(
-                        row[UserWeightLogsTable.userId].value.toString(),
-                        row[UserWeightLogsTable.recordedAt].toIsoOffsetPlus8(),
-                        formatDecimal(row[UserWeightLogsTable.weightKg]),
-                        row[UserWeightLogsTable.sourceType]
+                .forEach { row ->
+                    writer.writeRow(
+                        listOf(
+                            row[UserWeightLogsTable.userId].value.toString(),
+                            row[UserWeightLogsTable.recordedAt].toIsoOffsetPlus8(),
+                            formatDecimal(row[UserWeightLogsTable.weightKg]),
+                            row[UserWeightLogsTable.sourceType]
+                        )
                     )
                 }
         }
+    }
 
-        val medicationRows = if (patientRefs.isEmpty()) {
-            emptyList()
-        } else {
+    private fun org.jetbrains.exposed.sql.Transaction.writeMedicationsCsv(
+        zip: ZipOutputStream,
+        patientRefs: List<EntityID<Long>>
+    ) {
+        zip.writeCsvEntry("medications.csv", MEDICATIONS_CSV_HEADERS) { writer ->
+            if (patientRefs.isEmpty()) {
+                return@writeCsvEntry
+            }
+
             UserMedicationsTable.selectAll().where {
                 UserMedicationsTable.userId inList patientRefs
             }.orderBy(UserMedicationsTable.userId, SortOrder.ASC)
                 .orderBy(UserMedicationsTable.createdAt, SortOrder.ASC)
                 .orderBy(UserMedicationsTable.id, SortOrder.ASC)
-                .toList()
-                .map { row ->
-                    listOf(
-                        row[UserMedicationsTable.userId].value.toString(),
-                        row[UserMedicationsTable.id].value.toString(),
-                        row[UserMedicationsTable.drugName],
-                        parseDoseTimesForExport(row[UserMedicationsTable.doseTimesJson]),
-                        row[UserMedicationsTable.recordedDateLocal].toString(),
-                        row[UserMedicationsTable.endDateLocal].toString(),
-                        formatDecimal(row[UserMedicationsTable.doseAmount]),
-                        row[UserMedicationsTable.doseUnit].name,
-                        formatDecimal(row[UserMedicationsTable.tabletStrengthAmount]),
-                        row[UserMedicationsTable.tabletStrengthUnit]?.name.orEmpty(),
-                        formatYesNo(row[UserMedicationsTable.deletedAt] != null),
-                        row[UserMedicationsTable.deletedAt]?.toIsoInstant().orEmpty(),
-                        row[UserMedicationsTable.createdAt].toIsoInstant(),
-                        row[UserMedicationsTable.updatedAt].toIsoInstant()
+                .forEach { row ->
+                    writer.writeRow(
+                        listOf(
+                            row[UserMedicationsTable.userId].value.toString(),
+                            row[UserMedicationsTable.id].value.toString(),
+                            row[UserMedicationsTable.drugName],
+                            parseDoseTimesForExport(row[UserMedicationsTable.doseTimesJson]),
+                            row[UserMedicationsTable.recordedDateLocal].toString(),
+                            row[UserMedicationsTable.endDateLocal].toString(),
+                            formatDecimal(row[UserMedicationsTable.doseAmount]),
+                            row[UserMedicationsTable.doseUnit].name,
+                            formatDecimal(row[UserMedicationsTable.tabletStrengthAmount]),
+                            row[UserMedicationsTable.tabletStrengthUnit]?.name.orEmpty(),
+                            formatYesNo(row[UserMedicationsTable.deletedAt] != null),
+                            row[UserMedicationsTable.deletedAt]?.toIsoInstant().orEmpty(),
+                            row[UserMedicationsTable.createdAt].toIsoInstant(),
+                            row[UserMedicationsTable.updatedAt].toIsoInstant()
+                        )
                     )
                 }
         }
-
-        val scaleAnswerRows = buildScaleAnswerRows(patientRefs)
-        return DoctorExportRows(
-            generatedAt = now,
-            patients = patientRows,
-            weightLogs = weightRows,
-            medications = medicationRows,
-            scaleAnswers = scaleAnswerRows
-        )
     }
 
-    private fun org.jetbrains.exposed.sql.Transaction.buildScaleAnswerRows(
+    private fun org.jetbrains.exposed.sql.Transaction.writeScaleAnswersCsv(
+        zip: ZipOutputStream,
         patientRefs: List<EntityID<Long>>
-    ): List<List<String>> {
-        if (patientRefs.isEmpty()) {
-            return emptyList()
-        }
-        val sessions = UserScaleSessionsTable.selectAll().where {
-            (UserScaleSessionsTable.userId inList patientRefs) and
-                (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED)
-        }.orderBy(UserScaleSessionsTable.userId, SortOrder.ASC)
-            .orderBy(UserScaleSessionsTable.submittedAt, SortOrder.ASC)
-            .orderBy(UserScaleSessionsTable.id, SortOrder.ASC)
-            .toList()
-        if (sessions.isEmpty()) {
-            return emptyList()
-        }
-
-        val sessionRefs = sessions.map { it[UserScaleSessionsTable.id] }
-        val answerRows = UserScaleAnswerRecordsTable.selectAll().where {
-            UserScaleAnswerRecordsTable.sessionId inList sessionRefs
-        }.toList()
-        if (answerRows.isEmpty()) {
-            return emptyList()
-        }
-
-        val latestAnswerBySessionQuestion = mutableMapOf<Pair<Long, Long>, ResultRow>()
-        answerRows.forEach { row ->
-            val key = row[UserScaleAnswerRecordsTable.sessionId].value to row[UserScaleAnswerRecordsTable.questionId].value
-            val current = latestAnswerBySessionQuestion[key]
-            if (current == null || isAnswerRecordLater(row, current)) {
-                latestAnswerBySessionQuestion[key] = row
+    ) {
+        zip.writeCsvEntry("scale_answers.csv", SCALE_ANSWERS_CSV_HEADERS) { writer ->
+            if (patientRefs.isEmpty()) {
+                return@writeCsvEntry
             }
-        }
-        if (latestAnswerBySessionQuestion.isEmpty()) {
-            return emptyList()
-        }
 
-        val questionRefs = latestAnswerBySessionQuestion.values.map { it[UserScaleAnswerRecordsTable.questionId] }.distinct()
-        val questionById = if (questionRefs.isEmpty()) {
-            emptyMap()
-        } else {
-            ScaleQuestionsTable.selectAll().where {
-                ScaleQuestionsTable.id inList questionRefs
-            }.associateBy { it[ScaleQuestionsTable.id].value }
-        }
-        val optionRowsByQuestionId = if (questionRefs.isEmpty()) {
-            emptyMap()
-        } else {
-            ScaleOptionsTable.selectAll().where {
-                ScaleOptionsTable.questionId inList questionRefs
-            }.orderBy(ScaleOptionsTable.orderNo, SortOrder.ASC)
+            val sessions = UserScaleSessionsTable.selectAll().where {
+                (UserScaleSessionsTable.userId inList patientRefs) and
+                    (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED)
+            }.orderBy(UserScaleSessionsTable.userId, SortOrder.ASC)
+                .orderBy(UserScaleSessionsTable.submittedAt, SortOrder.ASC)
+                .orderBy(UserScaleSessionsTable.id, SortOrder.ASC)
                 .toList()
-                .groupBy { it[ScaleOptionsTable.questionId].value }
-        }
-        val optionLabelByQuestionIdAndOptionId = optionRowsByQuestionId.mapValues { (_, rows) ->
-            rows.associate { row ->
-                row[ScaleOptionsTable.id].value to row[ScaleOptionsTable.label]
+            if (sessions.isEmpty()) {
+                return@writeCsvEntry
             }
-        }
-        val optionLabelByQuestionIdAndOptionKey = optionRowsByQuestionId.mapValues { (_, rows) ->
-            rows.associate { row ->
-                row[ScaleOptionsTable.optionKey] to row[ScaleOptionsTable.label]
+
+            val sessionRefs = sessions.map { it[UserScaleSessionsTable.id] }
+            val answerRows = UserScaleAnswerRecordsTable.selectAll().where {
+                UserScaleAnswerRecordsTable.sessionId inList sessionRefs
+            }.toList()
+            if (answerRows.isEmpty()) {
+                return@writeCsvEntry
             }
-        }
 
-        val scaleRefs = sessions.map { it[UserScaleSessionsTable.scaleId] }.distinct()
-        val scaleById = if (scaleRefs.isEmpty()) {
-            emptyMap()
-        } else {
-            ScalesTable.selectAll().where {
-                ScalesTable.id inList scaleRefs
-            }.associateBy { it[ScalesTable.id].value }
-        }
-
-        val latestAnswersBySessionId = latestAnswerBySessionQuestion.values.groupBy { it[UserScaleAnswerRecordsTable.sessionId].value }
-        return sessions.flatMap { session ->
-            val sessionId = session[UserScaleSessionsTable.id].value
-            val scaleRow = scaleById[session[UserScaleSessionsTable.scaleId].value]
-            val rawScaleCode = scaleRow?.get(ScalesTable.code) ?: "SCALE-${session[UserScaleSessionsTable.scaleId].value}"
-            val normalizedScaleCode = normalizeScaleCodeForExport(rawScaleCode)
-            val sessionSubmittedAt = session[UserScaleSessionsTable.submittedAt]
-            latestAnswersBySessionId[sessionId].orEmpty()
-                .sortedWith(
-                    compareBy<ResultRow> {
-                        questionById[it[UserScaleAnswerRecordsTable.questionId].value]?.get(ScaleQuestionsTable.orderNo)
-                            ?: Int.MAX_VALUE
-                    }.thenBy { it[UserScaleAnswerRecordsTable.questionId].value }
-                )
-                .map { answer ->
-                    val questionId = answer[UserScaleAnswerRecordsTable.questionId].value
-                    val questionOrderNo = questionById[questionId]?.get(ScaleQuestionsTable.orderNo)
-                    val questionIdentifier = if (questionOrderNo != null) {
-                        "$normalizedScaleCode-$questionOrderNo"
-                    } else {
-                        "$normalizedScaleCode-Q$questionId"
-                    }
-                    val answerDate = (sessionSubmittedAt ?: answer[UserScaleAnswerRecordsTable.answeredAt]).toIsoOffsetPlus8()
-                    val enrichedRawAnswerJson = enrichRawAnswerJsonForExport(
-                        rawAnswerJson = answer[UserScaleAnswerRecordsTable.rawAnswerJson],
-                        optionLabelById = optionLabelByQuestionIdAndOptionId[questionId].orEmpty(),
-                        optionLabelByKey = optionLabelByQuestionIdAndOptionKey[questionId].orEmpty(),
-                        json = deps.json
-                    )
-                    listOf(
-                        session[UserScaleSessionsTable.userId].value.toString(),
-                        sessionId.toString(),
-                        rawScaleCode,
-                        scaleRow?.get(ScalesTable.name).orEmpty(),
-                        questionIdentifier,
-                        enrichedRawAnswerJson,
-                        answerDate
-                    )
+            val latestAnswerBySessionQuestion = mutableMapOf<Pair<Long, Long>, ResultRow>()
+            answerRows.forEach { row ->
+                val key = row[UserScaleAnswerRecordsTable.sessionId].value to row[UserScaleAnswerRecordsTable.questionId].value
+                val current = latestAnswerBySessionQuestion[key]
+                if (current == null || isAnswerRecordLater(row, current)) {
+                    latestAnswerBySessionQuestion[key] = row
                 }
+            }
+            if (latestAnswerBySessionQuestion.isEmpty()) {
+                return@writeCsvEntry
+            }
+
+            val questionRefs = latestAnswerBySessionQuestion.values.map { it[UserScaleAnswerRecordsTable.questionId] }.distinct()
+            val questionById = if (questionRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                ScaleQuestionsTable.selectAll().where {
+                    ScaleQuestionsTable.id inList questionRefs
+                }.associateBy { it[ScaleQuestionsTable.id].value }
+            }
+            val optionRowsByQuestionId = if (questionRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                ScaleOptionsTable.selectAll().where {
+                    ScaleOptionsTable.questionId inList questionRefs
+                }.orderBy(ScaleOptionsTable.orderNo, SortOrder.ASC)
+                    .toList()
+                    .groupBy { it[ScaleOptionsTable.questionId].value }
+            }
+            val optionLabelByQuestionIdAndOptionId = optionRowsByQuestionId.mapValues { (_, rows) ->
+                rows.associate { row ->
+                    row[ScaleOptionsTable.id].value to row[ScaleOptionsTable.label]
+                }
+            }
+            val optionLabelByQuestionIdAndOptionKey = optionRowsByQuestionId.mapValues { (_, rows) ->
+                rows.associate { row ->
+                    row[ScaleOptionsTable.optionKey] to row[ScaleOptionsTable.label]
+                }
+            }
+
+            val scaleRefs = sessions.map { it[UserScaleSessionsTable.scaleId] }.distinct()
+            val scaleById = if (scaleRefs.isEmpty()) {
+                emptyMap()
+            } else {
+                ScalesTable.selectAll().where {
+                    ScalesTable.id inList scaleRefs
+                }.associateBy { it[ScalesTable.id].value }
+            }
+
+            val latestAnswersBySessionId = latestAnswerBySessionQuestion.values.groupBy { it[UserScaleAnswerRecordsTable.sessionId].value }
+            sessions.forEach { session ->
+                val sessionId = session[UserScaleSessionsTable.id].value
+                val scaleRow = scaleById[session[UserScaleSessionsTable.scaleId].value]
+                val rawScaleCode = scaleRow?.get(ScalesTable.code) ?: "SCALE-${session[UserScaleSessionsTable.scaleId].value}"
+                val normalizedScaleCode = normalizeScaleCodeForExport(rawScaleCode)
+                val sessionSubmittedAt = session[UserScaleSessionsTable.submittedAt]
+                latestAnswersBySessionId[sessionId].orEmpty()
+                    .sortedWith(
+                        compareBy<ResultRow> {
+                            questionById[it[UserScaleAnswerRecordsTable.questionId].value]?.get(ScaleQuestionsTable.orderNo)
+                                ?: Int.MAX_VALUE
+                        }.thenBy { it[UserScaleAnswerRecordsTable.questionId].value }
+                    )
+                    .forEach { answer ->
+                        val questionId = answer[UserScaleAnswerRecordsTable.questionId].value
+                        val questionOrderNo = questionById[questionId]?.get(ScaleQuestionsTable.orderNo)
+                        val questionIdentifier = if (questionOrderNo != null) {
+                            "$normalizedScaleCode-$questionOrderNo"
+                        } else {
+                            "$normalizedScaleCode-Q$questionId"
+                        }
+                        val answerDate = (sessionSubmittedAt ?: answer[UserScaleAnswerRecordsTable.answeredAt]).toIsoOffsetPlus8()
+                        val enrichedRawAnswerJson = enrichRawAnswerJsonForExport(
+                            rawAnswerJson = answer[UserScaleAnswerRecordsTable.rawAnswerJson],
+                            optionLabelById = optionLabelByQuestionIdAndOptionId[questionId].orEmpty(),
+                            optionLabelByKey = optionLabelByQuestionIdAndOptionKey[questionId].orEmpty(),
+                            json = deps.json
+                        )
+                        writer.writeRow(
+                            listOf(
+                                session[UserScaleSessionsTable.userId].value.toString(),
+                                sessionId.toString(),
+                                rawScaleCode,
+                                scaleRow?.get(ScalesTable.name).orEmpty(),
+                                questionIdentifier,
+                                enrichedRawAnswerJson,
+                                answerDate
+                            )
+                        )
+                    }
+            }
         }
     }
 
@@ -393,6 +424,37 @@ internal class DoctorExportDomainService(private val deps: DoctorServiceDeps) {
         val parsed = runCatching { deps.json.decodeFromString<List<String>>(raw) }.getOrNull()
             ?: return raw
         return parsed.mapNotNull { it.trim().takeIf { value -> value.isNotEmpty() } }.joinToString("|")
+    }
+}
+
+private class ZipCsvEntryWriter(
+    private val zip: ZipOutputStream,
+    private val columnCount: Int
+) {
+    fun writeRow(row: List<String>) {
+        val normalized = if (row.size < columnCount) {
+            row + List(columnCount - row.size) { "" }
+        } else {
+            row.take(columnCount)
+        }
+        val line = normalized.joinToString(",") { escapeCsvCell(it) } + CSV_NEWLINE
+        zip.write(line.toByteArray(StandardCharsets.UTF_8))
+    }
+}
+
+private inline fun ZipOutputStream.writeCsvEntry(
+    name: String,
+    headers: List<String>,
+    block: (ZipCsvEntryWriter) -> Unit
+) {
+    putNextEntry(ZipEntry(name))
+    try {
+        write(CSV_BOM)
+        val writer = ZipCsvEntryWriter(this, headers.size)
+        writer.writeRow(headers)
+        block(writer)
+    } finally {
+        closeEntry()
     }
 }
 

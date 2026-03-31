@@ -625,18 +625,38 @@ class ScaleService(
             }.orderBy(UserScaleSessionsTable.id, SortOrder.DESC).limit(safeLimit + 1).toList()
             val hasMore = rows.size > safeLimit
             val page = if (hasMore) rows.take(safeLimit) else rows
+            val scaleById = if (page.isEmpty()) {
+                emptyMap()
+            } else {
+                val scaleRefs = page.map { it[UserScaleSessionsTable.scaleId] }.distinct()
+                ScalesTable.selectAll().where {
+                    ScalesTable.id inList scaleRefs
+                }.associateBy { it[ScalesTable.id].value }
+            }
+            val versionById = if (page.isEmpty()) {
+                emptyMap()
+            } else {
+                val versionRefs = page.map { it[UserScaleSessionsTable.versionId] }.distinct()
+                ScaleVersionsTable.selectAll().where {
+                    ScaleVersionsTable.id inList versionRefs
+                }.associateBy { it[ScaleVersionsTable.id].value }
+            }
+            val resultBySessionId = if (page.isEmpty()) {
+                emptyMap()
+            } else {
+                UserScaleResultsTable.selectAll().where {
+                    UserScaleResultsTable.sessionId inList page.map { it[UserScaleSessionsTable.id] }
+                }.associateBy { it[UserScaleResultsTable.sessionId].value }
+            }
             val items = page.map { row ->
-                val scaleRow = ScalesTable.selectAll().where {
-                    ScalesTable.id eq row[UserScaleSessionsTable.scaleId]
-                }.first()
-                val versionRow = ScaleVersionsTable.selectAll().where {
-                    ScaleVersionsTable.id eq row[UserScaleSessionsTable.versionId]
-                }.first()
-                val resultRow = UserScaleResultsTable.selectAll().where {
-                    UserScaleResultsTable.sessionId eq row[UserScaleSessionsTable.id]
-                }.firstOrNull()
+                val sessionId = row[UserScaleSessionsTable.id].value
+                val scaleRow = scaleById[row[UserScaleSessionsTable.scaleId].value]
+                    ?: throw invalidScaleArg("Scale not found for session=$sessionId")
+                val versionRow = versionById[row[UserScaleSessionsTable.versionId].value]
+                    ?: throw invalidScaleArg("Version not found for session=$sessionId")
+                val resultRow = resultBySessionId[sessionId]
                 ScaleHistoryItem(
-                    sessionId = row[UserScaleSessionsTable.id].value,
+                    sessionId = sessionId,
                     scaleId = scaleRow[ScalesTable.id].value,
                     scaleCode = scaleRow[ScalesTable.code],
                     scaleName = scaleRow[ScalesTable.name],
