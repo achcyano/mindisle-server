@@ -55,8 +55,8 @@ class EventService {
             val drafts = mutableListOf<EventDraft>()
             appendScaleRedoEvents(userRef, userCreatedAt, now, drafts)
             appendInProgressScaleEvents(userRef, drafts)
-            appendDoctorBindingEvent(userRef, userCreatedAt, drafts)
-            appendMedicationPlanEmptyEvent(userRef, userCreatedAt, drafts)
+            appendDoctorBindingEvent(userRef, userCreatedAt, now, drafts)
+            appendMedicationPlanEmptyEvent(userRef, userCreatedAt, now, drafts)
             appendMonthlyProfileUpdateEvent(userCreatedAt, now, drafts)
 
             val items = drafts
@@ -115,6 +115,7 @@ class EventService {
         latestVersionByScaleId.keys.sorted().forEach { scaleId ->
             val scaleRow = scalesById[scaleId] ?: return@forEach
             val versionRow = latestVersionByScaleId.getValue(scaleId)
+            val delivery = parseEventScaleDelivery(versionRow[ScaleVersionsTable.configJson])
             val intervalDays = parseRedoIntervalDays(
                 configJson = versionRow[ScaleVersionsTable.configJson],
                 defaultValue = DEFAULT_SCALE_REDO_INTERVAL_DAYS
@@ -130,6 +131,8 @@ class EventService {
                     put("scaleCode", scaleRow[ScalesTable.code])
                     put("scaleName", scaleRow[ScalesTable.name])
                     put("intervalDays", intervalDays)
+                    put("deliveryMode", delivery.mode.name)
+                    delivery.webPath?.let { put("webPath", it) }
                 }
             )
         }
@@ -156,20 +159,34 @@ class EventService {
         val scalesById = ScalesTable.selectAll().where {
             ScalesTable.id inList scaleRefs
         }.toList().associateBy { it[ScalesTable.id].value }
+        val versionByScaleId = ScaleVersionsTable.selectAll().where {
+            (ScaleVersionsTable.scaleId inList scaleRefs) and
+                (ScaleVersionsTable.status eq ScaleStatus.PUBLISHED)
+        }.orderBy(ScaleVersionsTable.scaleId, SortOrder.ASC)
+            .orderBy(ScaleVersionsTable.version, SortOrder.DESC)
+            .toList()
+            .groupBy { it[ScaleVersionsTable.scaleId].value }
+            .mapValues { (_, rows) -> rows.first() }
 
         latestByScaleId.keys.sorted().forEach { scaleId ->
             val session = latestByScaleId.getValue(scaleId)
             val scale = scalesById[scaleId] ?: return@forEach
+            val delivery = versionByScaleId[scaleId]
+                ?.let { parseEventScaleDelivery(it[ScaleVersionsTable.configJson]) }
+                ?: EventScaleDelivery()
+            val sessionId = session[UserScaleSessionsTable.id].value
             output += EventDraft(
                 eventName = EVENT_SCALE_SESSION_IN_PROGRESS,
                 eventType = EVENT_TYPE_CONTINUE_SCALE_SESSION,
                 dueAt = session[UserScaleSessionsTable.updatedAt],
                 payload = buildJsonObject {
-                    put("sessionId", session[UserScaleSessionsTable.id].value)
+                    put("sessionId", sessionId)
                     put("scaleId", scaleId)
                     put("scaleCode", scale[ScalesTable.code])
                     put("scaleName", scale[ScalesTable.name])
                     put("progress", session[UserScaleSessionsTable.progress])
+                    put("deliveryMode", delivery.mode.name)
+                    delivery.historyWebPath(sessionId)?.let { put("webPath", it) }
                 }
             )
         }
@@ -178,6 +195,7 @@ class EventService {
     private fun org.jetbrains.exposed.sql.Transaction.appendDoctorBindingEvent(
         userId: EntityID<Long>,
         userCreatedAt: LocalDateTime,
+        now: LocalDateTime,
         output: MutableList<EventDraft>
     ) {
         val hasActiveBinding = DoctorPatientBindingsTable.selectAll().where {
@@ -189,7 +207,7 @@ class EventService {
             output += EventDraft(
                 eventName = EVENT_DOCTOR_BIND_REQUIRED,
                 eventType = EVENT_TYPE_BIND_DOCTOR,
-                dueAt = userCreatedAt,
+                dueAt = normalizeImmediateDueAt(userCreatedAt, now),
                 payload = buildJsonObject {}
             )
         }
@@ -198,6 +216,7 @@ class EventService {
     private fun org.jetbrains.exposed.sql.Transaction.appendMedicationPlanEmptyEvent(
         userId: EntityID<Long>,
         userCreatedAt: LocalDateTime,
+        now: LocalDateTime,
         output: MutableList<EventDraft>
     ) {
         val activeCount = UserMedicationsTable.selectAll().where {
@@ -207,7 +226,7 @@ class EventService {
             output += EventDraft(
                 eventName = EVENT_MEDICATION_PLAN_EMPTY,
                 eventType = EVENT_TYPE_IMPORT_MEDICATION_PLAN,
-                dueAt = userCreatedAt,
+                dueAt = normalizeImmediateDueAt(userCreatedAt, now),
                 payload = buildJsonObject {
                     put("activeMedicationCount", 0)
                 }

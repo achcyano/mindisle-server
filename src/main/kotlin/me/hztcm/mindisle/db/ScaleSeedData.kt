@@ -1,13 +1,17 @@
 package me.hztcm.mindisle.db
 
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
+import org.jetbrains.exposed.sql.update
 import java.math.BigDecimal
 
 object ScaleSeedData {
     fun seedDefaultsIfEmpty() {
+        discardLegacyTessV1Data()
         listOf(
             buildPhq9(),
             buildGad7(),
@@ -16,6 +20,31 @@ object ScaleSeedData {
             buildEpq88(),
             buildTess()
         ).forEach(::seedScaleVersionIfAbsent)
+    }
+
+    private fun discardLegacyTessV1Data() {
+        val tessScaleId = ScalesTable.selectAll().where {
+            ScalesTable.code eq "TESS"
+        }.firstOrNull()?.get(ScalesTable.id) ?: return
+        val legacyVersionId = ScaleVersionsTable.selectAll().where {
+            (ScaleVersionsTable.scaleId eq tessScaleId) and
+                (ScaleVersionsTable.version eq 1)
+        }.firstOrNull()?.get(ScaleVersionsTable.id) ?: return
+        val legacySessionIds = UserScaleSessionsTable.selectAll().where {
+            UserScaleSessionsTable.versionId eq legacyVersionId
+        }.map { it[UserScaleSessionsTable.id] }
+        if (legacySessionIds.isNotEmpty()) {
+            UserScaleResultsTable.deleteWhere { UserScaleResultsTable.sessionId inList legacySessionIds }
+            UserScaleAnswerRecordsTable.deleteWhere { UserScaleAnswerRecordsTable.sessionId inList legacySessionIds }
+            UserScaleAnswersTable.deleteWhere { UserScaleAnswersTable.sessionId inList legacySessionIds }
+            UserScaleSessionsTable.deleteWhere { UserScaleSessionsTable.id inList legacySessionIds }
+        }
+        ScaleVersionsTable.update({
+            ScaleVersionsTable.id eq legacyVersionId
+        }) {
+            it[status] = ScaleStatus.ARCHIVED
+            it[updatedAt] = java.time.LocalDateTime.now(java.time.ZoneOffset.UTC)
+        }
     }
 
     private fun seedScaleVersionIfAbsent(seed: SeedScale) {
@@ -443,39 +472,26 @@ object ScaleSeedData {
     }
 
     private fun buildTess(): SeedScale {
-        val severityOptions = tessSeverityOptions()
-        val relationOptions = tessRelationOptions()
-        val questions = tessItems().flatMapIndexed { index, item ->
+        val options = tessSeverityOptions() + tessRelationOptions()
+        val questions = tessItems().mapIndexed { index, item ->
             val order = index + 1
-            listOf(
-                SeedQuestion(
-                    questionKey = "q${order}_severity",
-                    orderNo = order * 2 - 1,
-                    stem = item.name,
-                    dimension = item.dimension,
-                    note = item.description,
-                    optionSetCode = "TESS_SEVERITY_0_4",
-                    metaJson = item.toMetaJson(order, "severity"),
-                    options = severityOptions
-                ),
-                SeedQuestion(
-                    questionKey = "q${order}_relation",
-                    orderNo = order * 2,
-                    stem = "${item.name}与目前服用药物的关联性",
-                    dimension = item.dimension,
-                    scorable = false,
-                    note = "若未出现该症状，网页会自动记录为无关。",
-                    optionSetCode = "TESS_RELATION_0_3",
-                    metaJson = item.toMetaJson(order, "relation"),
-                    options = relationOptions
-                )
+            SeedQuestion(
+                questionKey = "q$order",
+                orderNo = order,
+                stem = item.name,
+                type = ScaleQuestionType.TESS_ITEM,
+                dimension = item.dimension,
+                note = item.description,
+                optionSetCode = "TESS_ITEM",
+                metaJson = item.toMetaJson(order),
+                options = options
             )
         }
         return SeedScale(
             code = "TESS",
             name = "TESS 药物副反应自评",
             description = "用于评估过去一周服药期间常见不适症状及其与药物的可能关联。",
-            version = 1,
+            version = 2,
             method = ScaleScoringMethod.TESS,
             ruleJson = "{}",
             configJson = """
@@ -485,7 +501,8 @@ object ScaleSeedData {
                     "mode": "WEBVIEW",
                     "webPath": "/web/scales/TESS"
                   },
-                  "defaultOptionSet": "TESS_SEVERITY_0_4",
+                  "answerSchema": "TESS_ITEM_V2",
+                  "defaultOptionSet": "TESS_ITEM",
                   "dimensions": [
                     {"key":"neurologic","name":"神经系统","min":0,"max":12},
                     {"key":"autonomic","name":"自主神经","min":0,"max":12},
@@ -796,11 +813,11 @@ private data class TessSeedItem(
     val nameEn: String,
     val description: String
 ) {
-    fun toMetaJson(order: Int, kind: String): String {
+    fun toMetaJson(order: Int): String {
         return """
             {
               "tessItemId": $order,
-              "kind": "$kind",
+              "answerSchema": "TESS_ITEM_V2",
               "system": "$system",
               "nameEn": "$nameEn",
               "description": "$description"

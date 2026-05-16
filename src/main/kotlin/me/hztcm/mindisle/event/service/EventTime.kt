@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
+import me.hztcm.mindisle.model.ScaleDeliveryModeDto
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -22,16 +23,7 @@ internal fun LocalDateTime.toIsoOffsetPlus8(): String {
 
 internal fun nextRecurringDueByDays(anchor: LocalDateTime, intervalDays: Int, now: LocalDateTime): LocalDateTime {
     require(intervalDays > 0) { "intervalDays must be positive" }
-    val step = intervalDays.toLong()
-    val firstDue = anchor.plusDays(step)
-    if (!firstDue.isBefore(now)) {
-        return firstDue
-    }
-
-    val periodSeconds = step * 24L * 60L * 60L
-    val elapsedSeconds = java.time.Duration.between(firstDue, now).seconds
-    val cycles = (elapsedSeconds / periodSeconds) + 1
-    return firstDue.plusDays(cycles * step)
+    return anchor.plusDays(intervalDays.toLong())
 }
 
 internal fun nextRecurringDueByMonths(anchor: LocalDateTime, intervalMonths: Int, now: LocalDateTime): LocalDateTime {
@@ -41,6 +33,40 @@ internal fun nextRecurringDueByMonths(anchor: LocalDateTime, intervalMonths: Int
         due = due.plusMonths(intervalMonths.toLong())
     }
     return due
+}
+
+internal fun normalizeImmediateDueAt(anchor: LocalDateTime, now: LocalDateTime): LocalDateTime {
+    return if (anchor.isAfter(now)) now else anchor
+}
+
+internal data class EventScaleDelivery(
+    val mode: ScaleDeliveryModeDto = ScaleDeliveryModeDto.NATIVE,
+    val webPath: String? = null
+) {
+    fun historyWebPath(sessionId: Long): String? {
+        val path = webPath ?: return null
+        val separator = if (path.contains("?")) "&" else "?"
+        return "$path${separator}sessionId=$sessionId"
+    }
+}
+
+internal fun parseEventScaleDelivery(configJson: String?): EventScaleDelivery {
+    if (configJson.isNullOrBlank()) {
+        return EventScaleDelivery()
+    }
+    val root = runCatching { EVENT_JSON.parseToJsonElement(configJson) as? JsonObject }.getOrNull()
+        ?: return EventScaleDelivery()
+    val delivery = root["delivery"] as? JsonObject ?: return EventScaleDelivery()
+    val modeText = (delivery["mode"] as? JsonPrimitive)?.content?.trim()?.uppercase()
+    if (modeText != ScaleDeliveryModeDto.WEBVIEW.name) {
+        return EventScaleDelivery()
+    }
+    val webPath = (delivery["webPath"] as? JsonPrimitive)
+        ?.content
+        ?.trim()
+        ?.takeIf { it.startsWith("/") }
+        ?: return EventScaleDelivery()
+    return EventScaleDelivery(mode = ScaleDeliveryModeDto.WEBVIEW, webPath = webPath)
 }
 
 internal fun parseRedoIntervalDays(configJson: String?, defaultValue: Int): Int {

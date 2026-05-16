@@ -201,6 +201,7 @@ Base URL: `/api/v1`
      - 与患者端 `GET /scales/history` 同口径（会话级历史列表）
      - 返回字段：`items[].sessionId/scaleId/scaleCode/scaleName/versionId/version/progress/totalScore/submittedAt/updatedAt/deliveryMode/webPath`、`nextCursor`
      - WebView 量表（如 TESS）的 `webPath` 会带 `sessionId`，可由客户端直接打开记录页。
+     - 医生端导出的 `scale_answers.csv` 中，TESS 按 15 个症状项导出，每个症状项一行；原始答案 JSON 同时包含严重程度和药物关联性。
 12. `GET /doctors/me/patients/{patientUserId}/scales/sessions/{sessionId}/result`
    - 与患者端 `GET /scales/sessions/{sessionId}/result` 同口径，返回单次会话的评分结果与维度结果
    - 仅允许查询当前医生已绑定患者的会话

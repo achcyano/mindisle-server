@@ -382,19 +382,31 @@ internal class DoctorExportDomainService(private val deps: DoctorServiceDeps) {
                     )
                     .forEach { answer ->
                         val questionId = answer[UserScaleAnswerRecordsTable.questionId].value
-                        val questionOrderNo = questionById[questionId]?.get(ScaleQuestionsTable.orderNo)
+                        val questionRow = questionById[questionId]
+                        val questionOrderNo = questionRow?.get(ScaleQuestionsTable.orderNo)
                         val questionIdentifier = if (questionOrderNo != null) {
                             "$normalizedScaleCode-$questionOrderNo"
                         } else {
                             "$normalizedScaleCode-Q$questionId"
                         }
                         val answerDate = (sessionSubmittedAt ?: answer[UserScaleAnswerRecordsTable.answeredAt]).toIsoOffsetPlus8()
-                        val enrichedRawAnswerJson = enrichRawAnswerJsonForExport(
-                            rawAnswerJson = answer[UserScaleAnswerRecordsTable.rawAnswerJson],
-                            optionLabelById = optionLabelByQuestionIdAndOptionId[questionId].orEmpty(),
-                            optionLabelByKey = optionLabelByQuestionIdAndOptionKey[questionId].orEmpty(),
-                            json = deps.json
-                        )
+                        val rawAnswerJson = answer[UserScaleAnswerRecordsTable.rawAnswerJson]
+                        val normalizedAnswerJson = answer[UserScaleAnswerRecordsTable.normalizedAnswerJson]
+                        val enrichedRawAnswerJson = if (rawScaleCode == "TESS") {
+                            enrichTessItemAnswerJsonForExport(
+                                normalizedAnswerJson = normalizedAnswerJson,
+                                optionLabelById = optionLabelByQuestionIdAndOptionId[questionId].orEmpty(),
+                                optionLabelByKey = optionLabelByQuestionIdAndOptionKey[questionId].orEmpty(),
+                                json = deps.json
+                            )
+                        } else {
+                            enrichRawAnswerJsonForExport(
+                                rawAnswerJson = rawAnswerJson,
+                                optionLabelById = optionLabelByQuestionIdAndOptionId[questionId].orEmpty(),
+                                optionLabelByKey = optionLabelByQuestionIdAndOptionKey[questionId].orEmpty(),
+                                json = deps.json
+                            )
+                        }
                         writer.writeRow(
                             listOf(
                                 session[UserScaleSessionsTable.userId].value.toString(),
@@ -481,6 +493,34 @@ internal fun enrichRawAnswerJsonForExport(
     val rawElement = runCatching { json.parseToJsonElement(rawAnswerJson) }.getOrNull() ?: return rawAnswerJson
     val enriched = enrichRawAnswerElement(rawElement, optionLabelById, optionLabelByKey)
     return json.encodeToString(JsonElement.serializer(), enriched)
+}
+
+internal fun enrichTessItemAnswerJsonForExport(
+    normalizedAnswerJson: String,
+    optionLabelById: Map<Long, String>,
+    optionLabelByKey: Map<String, String>,
+    json: Json = Json
+): String {
+    val obj = runCatching { json.parseToJsonElement(normalizedAnswerJson) as? JsonObject }.getOrNull()
+        ?: return normalizedAnswerJson
+    val severityOptionId = (obj["severityOptionId"] as? JsonPrimitive)?.longOrNull
+    val relationOptionId = (obj["relationOptionId"] as? JsonPrimitive)?.longOrNull
+    val severityOptionKey = (obj["severityOptionKey"] as? JsonPrimitive)?.content?.trim()
+    val relationOptionKey = (obj["relationOptionKey"] as? JsonPrimitive)?.content?.trim()
+    val severityLabel = severityOptionId?.let { optionLabelById[it] }
+        ?: severityOptionKey?.let { optionLabelByKey[it] }
+    val relationLabel = relationOptionId?.let { optionLabelById[it] }
+        ?: relationOptionKey?.let { optionLabelByKey[it] }
+    val enriched = linkedMapOf<String, JsonElement>()
+    enriched["severityOptionId"] = obj["severityOptionId"] ?: JsonPrimitive("")
+    severityOptionKey?.takeIf { it.isNotEmpty() }?.let { enriched["severityOptionKey"] = JsonPrimitive(it) }
+    enriched["severityScore"] = obj["severityScore"] ?: JsonPrimitive(0)
+    severityLabel?.let { enriched["severityLabel"] = JsonPrimitive(it) }
+    enriched["relationOptionId"] = obj["relationOptionId"] ?: JsonPrimitive("")
+    relationOptionKey?.takeIf { it.isNotEmpty() }?.let { enriched["relationOptionKey"] = JsonPrimitive(it) }
+    enriched["relationScore"] = obj["relationScore"] ?: JsonPrimitive(0)
+    relationLabel?.let { enriched["relationLabel"] = JsonPrimitive(it) }
+    return json.encodeToString(JsonElement.serializer(), JsonObject(enriched))
 }
 
 internal fun buildCsvBytes(headers: List<String>, rows: List<List<String>>): ByteArray {

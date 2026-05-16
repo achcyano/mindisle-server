@@ -1,6 +1,7 @@
 package me.hztcm.mindisle.scale.service
 
 import me.hztcm.mindisle.db.ScaleScoringMethod
+import me.hztcm.mindisle.db.ScaleQuestionType
 import me.hztcm.mindisle.model.Gender
 import java.math.BigDecimal
 import kotlin.test.Test
@@ -172,20 +173,14 @@ class ScaleScoringEngineTest {
     @Test
     fun tessShouldScoreSeverityOnlyAndReturnDrugRelationMetrics() {
         val questions = listOf(
-            ScoreQuestionRow(1, "q1_severity", "neurologic", true),
-            ScoreQuestionRow(2, "q1_relation", "neurologic", false),
-            ScoreQuestionRow(3, "q2_severity", "autonomic", true),
-            ScoreQuestionRow(4, "q2_relation", "autonomic", false),
-            ScoreQuestionRow(5, "q3_severity", "autonomic", true),
-            ScoreQuestionRow(6, "q3_relation", "autonomic", false)
+            ScoreQuestionRow(1, "q1", "neurologic", true, ScaleQuestionType.TESS_ITEM),
+            ScoreQuestionRow(2, "q2", "autonomic", true, ScaleQuestionType.TESS_ITEM),
+            ScoreQuestionRow(3, "q3", "autonomic", true, ScaleQuestionType.TESS_ITEM)
         )
         val answers = listOf(
-            ScoreAnswerRow(1, 3.toBigDecimal(), """{"optionKey":"sev_3","score":3}"""),
-            ScoreAnswerRow(2, null, """{"optionKey":"rel_3","score":3}"""),
-            ScoreAnswerRow(3, 2.toBigDecimal(), """{"optionKey":"sev_2","score":2}"""),
-            ScoreAnswerRow(4, null, """{"optionKey":"rel_1","score":1}"""),
-            ScoreAnswerRow(5, 0.toBigDecimal(), """{"optionKey":"sev_0","score":0}"""),
-            ScoreAnswerRow(6, null, """{"optionKey":"rel_0","score":0}""")
+            ScoreAnswerRow(1, 3.toBigDecimal(), """{"severityScore":3,"relationScore":3}"""),
+            ScoreAnswerRow(2, 2.toBigDecimal(), """{"severityScore":2,"relationScore":1}"""),
+            ScoreAnswerRow(3, 0.toBigDecimal(), """{"severityScore":0,"relationScore":0}""")
         )
 
         val result = ScaleScoringEngine.compute(

@@ -1212,6 +1212,7 @@ private fun ScaleQuestionType.toDto(): ScaleQuestionTypeDto = when (this) {
     ScaleQuestionType.TIME -> ScaleQuestionTypeDto.TIME
     ScaleQuestionType.DURATION -> ScaleQuestionTypeDto.DURATION
     ScaleQuestionType.YES_NO -> ScaleQuestionTypeDto.YES_NO
+    ScaleQuestionType.TESS_ITEM -> ScaleQuestionTypeDto.TESS_ITEM
 }
 
 private fun ScaleSessionStatus.toDto(): ScaleSessionStatusDto = when (this) {

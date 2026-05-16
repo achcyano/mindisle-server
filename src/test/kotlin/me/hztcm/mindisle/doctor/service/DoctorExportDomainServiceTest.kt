@@ -69,4 +69,17 @@ class DoctorExportDomainServiceTest {
         val labels = parsed["optionLabels"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
         assertEquals(listOf("几乎没有", "明显"), labels)
     }
+
+    @Test
+    fun `enrichTessItemAnswerJsonForExport appends severity and relation labels`() {
+        val enriched = enrichTessItemAnswerJsonForExport(
+            normalizedAnswerJson = """{"severityOptionId":11,"severityOptionKey":"sev_3","severityScore":3,"relationOptionId":21,"relationOptionKey":"rel_2","relationScore":2}""",
+            optionLabelById = mapOf(11L to "3 - 中度", 21L to "2 - 很可能有关"),
+            optionLabelByKey = emptyMap()
+        )
+
+        val parsed = Json.parseToJsonElement(enriched).jsonObject
+        assertEquals("3 - 中度", parsed["severityLabel"]?.jsonPrimitive?.content)
+        assertEquals("2 - 很可能有关", parsed["relationLabel"]?.jsonPrimitive?.content)
+    }
 }

@@ -477,13 +477,10 @@
           answersByQuestionId[answer.questionId] = answer;
         });
         items.forEach(item => {
-          const severityAnswer = answersByQuestionId[item.severityQuestion.questionId];
-          const relationAnswer = answersByQuestionId[item.relationQuestion.questionId];
-          if (severityAnswer) {
-            severityByItem[item.id] = optionScore(severityAnswer.answer, item.severityQuestion);
-          }
-          if (relationAnswer) {
-            relationByItem[item.id] = optionScore(relationAnswer.answer, item.relationQuestion);
+          const itemAnswer = answersByQuestionId[item.question.questionId];
+          if (itemAnswer) {
+            severityByItem[item.id] = Number(itemAnswer.answer.severityScore || 0);
+            relationByItem[item.id] = Number(itemAnswer.answer.relationScore || 0);
           }
         });
       }
@@ -493,11 +490,10 @@
         const item = items[currentIndex];
         setBusy(true);
         try {
-          await saveAnswer(item.severityQuestion, value);
           severityByItem[item.id] = value;
           if (value === 0) {
-            await saveAnswer(item.relationQuestion, 0);
             relationByItem[item.id] = 0;
+            await saveItemAnswer(item);
             await moveNext();
           } else {
             step = "relation";
@@ -516,8 +512,8 @@
         const item = items[currentIndex];
         setBusy(true);
         try {
-          await saveAnswer(item.relationQuestion, value);
           relationByItem[item.id] = value;
+          await saveItemAnswer(item);
           if ((severityByItem[item.id] || 0) >= 3) {
             setMessage(`您报告「${item.name}」达到中度或以上，建议您及时告知您的主治医生。`);
             await delay(900);
@@ -548,17 +544,28 @@
         render();
       }
 
-      async function saveAnswer(question, scoreValue) {
-        const option = (question.options || []).find(opt => Number(opt.scoreValue) === Number(scoreValue));
-        if (!option) {
+      async function saveItemAnswer(item) {
+        const severityOption = findOptionByScore(item.severityOptions, severityByItem[item.id] || 0);
+        const relationOption = findOptionByScore(item.relationOptions, relationByItem[item.id] || 0);
+        if (!severityOption || !relationOption) {
           throw new Error("题目选项配置错误");
         }
-        const data = await apiPut(`/scales/sessions/${session.sessionId}/answers/${question.questionId}`, {
-          answer: { optionId: option.optionId }
+        const data = await apiPut(`/scales/sessions/${session.sessionId}/answers/${item.question.questionId}`, {
+          answer: {
+            severityOptionId: severityOption.optionId,
+            relationOptionId: relationOption.optionId
+          }
         });
-        answersByQuestionId[question.questionId] = {
-          questionId: question.questionId,
-          answer: { optionId: option.optionId, optionKey: option.optionKey, score: option.scoreValue },
+        answersByQuestionId[item.question.questionId] = {
+          questionId: item.question.questionId,
+          answer: {
+            severityOptionId: severityOption.optionId,
+            severityOptionKey: severityOption.optionKey,
+            severityScore: severityOption.scoreValue,
+            relationOptionId: relationOption.optionId,
+            relationOptionKey: relationOption.optionKey,
+            relationScore: relationOption.scoreValue
+          },
           numericScore: data.numericScore,
           updatedAt: data.updatedAt
         };
@@ -583,9 +590,9 @@
         els.itemName.textContent = item.name;
         els.itemNameEn.textContent = item.nameEn ? `(${item.nameEn})` : "";
         els.stepCaption.textContent = step === "severity" ? "请选择严重程度：" : "与药物的关联性：";
-        const question = step === "severity" ? item.severityQuestion : item.relationQuestion;
+        const options = step === "severity" ? item.severityOptions : item.relationOptions;
         els.options.innerHTML = "";
-        (question.options || []).forEach(option => {
+        options.forEach(option => {
           const value = Number(option.scoreValue || 0);
           const button = document.createElement("button");
           button.type = "button";
@@ -662,29 +669,23 @@
       }
 
       function buildTessItems(questions) {
-        const groups = {};
-        questions.forEach(question => {
+        return questions.map(question => {
           const meta = question.meta || {};
           const id = meta.tessItemId;
-          const kind = meta.kind;
-          if (!id || !kind) return;
-          if (!groups[id]) {
-            groups[id] = {
-              id,
-              system: meta.system || question.dimension || "",
-              name: question.stem,
-              nameEn: meta.nameEn || "",
-              description: meta.description || question.note || "",
-              severityQuestion: null,
-              relationQuestion: null
-            };
-          }
-          if (kind === "severity") groups[id].severityQuestion = question;
-          if (kind === "relation") groups[id].relationQuestion = question;
-        });
-        return Object.keys(groups)
-          .map(key => groups[key])
-          .filter(item => item.severityQuestion && item.relationQuestion)
+          if (!id) return null;
+          const options = question.options || [];
+          return {
+            id,
+            system: meta.system || question.dimension || "",
+            name: question.stem,
+            nameEn: meta.nameEn || "",
+            description: meta.description || question.note || "",
+            question,
+            severityOptions: options.filter(option => (option.optionKey || "").startsWith("sev_")),
+            relationOptions: options.filter(option => (option.optionKey || "").startsWith("rel_"))
+          };
+        })
+          .filter(item => item && item.severityOptions.length && item.relationOptions.length)
           .sort((a, b) => a.id - b.id);
       }
 
@@ -709,15 +710,8 @@
         return true;
       }
 
-      function optionScore(answer, question) {
-        if (!answer || !question) return undefined;
-        const optionId = answer.optionId;
-        const optionKey = answer.optionKey;
-        const option = (question.options || []).find(opt => {
-          return (optionId !== undefined && opt.optionId === optionId) ||
-            (optionKey !== undefined && opt.optionKey === optionKey);
-        });
-        return option ? Number(option.scoreValue || 0) : undefined;
+      function findOptionByScore(options, scoreValue) {
+        return (options || []).find(opt => Number(opt.scoreValue) === Number(scoreValue));
       }
 
       function severityPrompt(item) {

@@ -431,10 +431,13 @@ internal object ScaleScoringEngine {
         scoreByQuestionId: Map<Long, BigDecimal>,
         answersByQuestionId: Map<Long, ScoreAnswerRow>
     ): MethodScoreResult {
-        val severityQuestions = questions.filter { it.questionKey.endsWith("_severity") }
-        val relationQuestions = questions.filter { it.questionKey.endsWith("_relation") }
-        val severityScores = severityQuestions.map { question ->
-            question to (scoreByQuestionId[question.questionId] ?: BigDecimal.ZERO)
+        val itemQuestions = questions.filter { it.type == ScaleQuestionType.TESS_ITEM }
+        val severityScores = itemQuestions.map { question ->
+            val answer = answersByQuestionId[question.questionId]
+            val severityScore = answer?.let { parseTessScore(it.answerJson, "severityScore") }
+                ?: scoreByQuestionId[question.questionId]
+                ?: BigDecimal.ZERO
+            question to severityScore
         }
         val totalScore = severityScores.sumOfOrNull { (_, score) -> score } ?: BigDecimal.ZERO
         val dimensionScores = linkedMapOf<String, BigDecimal>()
@@ -445,9 +448,9 @@ internal object ScaleScoringEngine {
         val symptomCount = severityScores.count { (_, score) -> score > BigDecimal.ZERO }
         val highSymptomCount = severityScores.count { (_, score) -> score >= BigDecimal("3") }
         val maxSeverity = severityScores.maxOfOrNull { (_, score) -> score } ?: BigDecimal.ZERO
-        val probableDrugRelatedCount = relationQuestions.count { question ->
+        val probableDrugRelatedCount = itemQuestions.count { question ->
             val score = answersByQuestionId[question.questionId]
-                ?.let { parseScoreFromAnswerJson(it.answerJson) }
+                ?.let { parseTessScore(it.answerJson, "relationScore") }
                 ?: BigDecimal.ZERO
             score >= BigDecimal("2")
         }
@@ -483,6 +486,11 @@ internal object ScaleScoringEngine {
             bandLevelName = levelName,
             resultText = "TESS 严重程度总分 ${totalScore.roundScale2()} 分，阳性症状 $symptomCount 项，中度及以上症状 $highSymptomCount 项，可能或很可能与药物相关 $probableDrugRelatedCount 项。"
         )
+    }
+
+    private fun parseTessScore(answerJson: String, key: String): BigDecimal? {
+        val element = parseAnswerJson(answerJson) as? JsonObject ?: return null
+        return element.number(key)?.toBigDecimal()
     }
 
     private fun parseRuleJson(ruleJson: String): JsonObject? {

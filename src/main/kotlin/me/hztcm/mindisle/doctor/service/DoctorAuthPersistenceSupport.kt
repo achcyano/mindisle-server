@@ -17,6 +17,7 @@ import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -74,7 +75,10 @@ internal class DoctorAuthPersistenceSupport(private val deps: DoctorServiceDeps)
         purpose: SmsPurpose,
         now: LocalDateTime
     ) {
+        val dbNow = now.toDbLocalPlus8()
         with(tx) {
+            val doctorPurposes = listOf(SmsPurpose.DOCTOR_REGISTER, SmsPurpose.DOCTOR_RESET_PASSWORD)
+
             when (purpose) {
                 SmsPurpose.DOCTOR_REGISTER -> {
                     val exists = DoctorsTable.selectAll().where { DoctorsTable.phone eq phone }.any()
@@ -102,11 +106,12 @@ internal class DoctorAuthPersistenceSupport(private val deps: DoctorServiceDeps)
             }
 
             val latest = SmsVerificationCodesTable.selectAll().where {
-                SmsVerificationCodesTable.phone eq phone
+                (SmsVerificationCodesTable.phone eq phone) and
+                    (SmsVerificationCodesTable.purpose inList doctorPurposes)
             }.orderBy(SmsVerificationCodesTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
             if (latest != null) {
                 val latestAt = latest[SmsVerificationCodesTable.createdAt]
-                if (latestAt.plusSeconds(deps.authConfig.smsCooldownSeconds) > now) {
+                if (latestAt.plusSeconds(deps.authConfig.smsCooldownSeconds) > dbNow) {
                     throw AppException(
                         code = ErrorCodes.SMS_TOO_FREQUENT,
                         message = "Sms code requested too frequently",
@@ -114,9 +119,10 @@ internal class DoctorAuthPersistenceSupport(private val deps: DoctorServiceDeps)
                     )
                 }
             }
-            val dayStart = now.toLocalDate().atStartOfDay()
+            val dayStart = dbNow.toLocalDate().atStartOfDay()
             val todayCount = SmsVerificationCodesTable.selectAll().where {
                 (SmsVerificationCodesTable.phone eq phone) and
+                    (SmsVerificationCodesTable.purpose inList doctorPurposes) and
                     (SmsVerificationCodesTable.createdAt greaterEq dayStart)
             }.count()
             if (todayCount >= deps.authConfig.smsDailyLimit) {
@@ -136,13 +142,14 @@ internal class DoctorAuthPersistenceSupport(private val deps: DoctorServiceDeps)
         code: String,
         now: LocalDateTime
     ): Boolean {
+        val dbNow = now.toDbLocalPlus8()
         if (deps.smsGateway != null) {
-            ensureSmsVerificationAttemptAllowed(tx, phone, purpose, now)
+            ensureSmsVerificationAttemptAllowed(tx, phone, purpose, dbNow)
             val success = deps.smsGateway.verifySmsCode(phone = phone, purpose = purpose, code = code)
-            recordSmsVerificationAttempt(tx, phone, purpose, success, now)
+            recordSmsVerificationAttempt(tx, phone, purpose, success, dbNow)
             return success
         }
-        ensureSmsVerificationAttemptAllowed(tx, phone, purpose, now)
+        ensureSmsVerificationAttemptAllowed(tx, phone, purpose, dbNow)
         val codeHash = sha256Hex(code)
         val row = with(tx) {
             SmsVerificationCodesTable.selectAll().where {
@@ -150,11 +157,11 @@ internal class DoctorAuthPersistenceSupport(private val deps: DoctorServiceDeps)
                     (SmsVerificationCodesTable.purpose eq purpose) and
                     (SmsVerificationCodesTable.codeHash eq codeHash) and
                     SmsVerificationCodesTable.consumedAt.isNull() and
-                    (SmsVerificationCodesTable.expiresAt greaterEq now)
+                    (SmsVerificationCodesTable.expiresAt greaterEq dbNow)
             }.orderBy(SmsVerificationCodesTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
         }
         if (row == null) {
-            recordSmsVerificationAttempt(tx, phone, purpose, false, now)
+            recordSmsVerificationAttempt(tx, phone, purpose, false, dbNow)
             return false
         }
         val affected = with(tx) {
@@ -162,11 +169,11 @@ internal class DoctorAuthPersistenceSupport(private val deps: DoctorServiceDeps)
                 (SmsVerificationCodesTable.id eq row[SmsVerificationCodesTable.id]) and
                     SmsVerificationCodesTable.consumedAt.isNull()
             }) {
-                it[SmsVerificationCodesTable.consumedAt] = now
+                it[SmsVerificationCodesTable.consumedAt] = dbNow
             }
         }
         val success = affected > 0
-        recordSmsVerificationAttempt(tx, phone, purpose, success, now)
+        recordSmsVerificationAttempt(tx, phone, purpose, success, dbNow)
         return success
     }
 

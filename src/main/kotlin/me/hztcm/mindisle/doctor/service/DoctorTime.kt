@@ -16,6 +16,10 @@ internal fun LocalDateTime.toIsoOffsetPlus8(): String {
         .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
 }
 
+internal fun LocalDateTime.toDbLocalPlus8(): LocalDateTime {
+    return atOffset(ZoneOffset.UTC).withOffsetSameInstant(ZoneOffset.ofHours(8)).toLocalDateTime()
+}
+
 internal fun parseInstantToUtcDateTime(value: String): LocalDateTime {
     return Instant.parse(value).atOffset(ZoneOffset.UTC).toLocalDateTime()
 }

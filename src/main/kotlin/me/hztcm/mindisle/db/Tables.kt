@@ -40,7 +40,8 @@ enum class ScaleQuestionType {
     TEXT,
     TIME,
     DURATION,
-    YES_NO
+    YES_NO,
+    TESS_ITEM
 }
 
 enum class ScaleScoringMethod {

@@ -73,4 +73,28 @@ class ScaleAnswerEvaluatorTest {
         assertNotNull(obj)
         assertEquals("360", obj["minutes"]?.toString())
     }
+
+    @Test
+    fun tessItemShouldStoreSeverityAndRelationButScoreSeverityOnly() {
+        val options = listOf(
+            ScaleOptionScore(optionId = 10, optionKey = "sev_0", scoreValue = 0.toBigDecimal()),
+            ScaleOptionScore(optionId = 11, optionKey = "sev_3", scoreValue = 3.toBigDecimal()),
+            ScaleOptionScore(optionId = 20, optionKey = "rel_0", scoreValue = 0.toBigDecimal()),
+            ScaleOptionScore(optionId = 21, optionKey = "rel_2", scoreValue = 2.toBigDecimal())
+        )
+
+        val result = ScaleAnswerEvaluator.evaluate(
+            type = ScaleQuestionType.TESS_ITEM,
+            scorable = true,
+            reverseScored = false,
+            options = options,
+            answer = json.parseToJsonElement("""{"severityOptionId":11,"relationOptionId":21}""")
+        )
+
+        val obj = result.normalizedAnswer as? JsonObject
+        assertNotNull(obj)
+        assertEquals(3.toBigDecimal(), result.numericScore)
+        assertEquals("3.0", obj["severityScore"]?.toString())
+        assertEquals("2.0", obj["relationScore"]?.toString())
+    }
 }

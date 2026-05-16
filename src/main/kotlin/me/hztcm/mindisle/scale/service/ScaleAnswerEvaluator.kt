@@ -50,6 +50,7 @@ internal object ScaleAnswerEvaluator {
             ScaleQuestionType.TEXT,
             ScaleQuestionType.TIME,
             ScaleQuestionType.DURATION -> evaluateOpenAnswer(type, scorable, answer)
+            ScaleQuestionType.TESS_ITEM -> evaluateTessItem(scorable, options, answer)
         }
     }
 
@@ -122,6 +123,34 @@ internal object ScaleAnswerEvaluator {
         )
     }
 
+    private fun evaluateTessItem(
+        scorable: Boolean,
+        options: List<ScaleOptionScore>,
+        answer: JsonElement
+    ): ScaleAnswerEvaluation {
+        val obj = answer.requireObject("TESS item answer must be an object")
+        val optionById = options.associateBy { it.optionId }
+        val optionByKey = options.associateBy { it.optionKey }
+        val severity = resolvePrefixedOption(obj, "severity", "sev_", optionById, optionByKey)
+        val relation = resolvePrefixedOption(obj, "relation", "rel_", optionById, optionByKey)
+        val severityScore = severity.scoreValue ?: BigDecimal.ZERO
+        val relationScore = relation.scoreValue ?: BigDecimal.ZERO
+        if (severityScore.compareTo(BigDecimal.ZERO) == 0 && relationScore.compareTo(BigDecimal.ZERO) != 0) {
+            throw answerFormatError("TESS relation must be rel_0 when severity is sev_0")
+        }
+        return ScaleAnswerEvaluation(
+            normalizedAnswer = buildJsonObject {
+                put("severityOptionId", severity.optionId)
+                put("severityOptionKey", severity.optionKey)
+                put("severityScore", severityScore.toDouble())
+                put("relationOptionId", relation.optionId)
+                put("relationOptionKey", relation.optionKey)
+                put("relationScore", relationScore.toDouble())
+            },
+            numericScore = severityScore.takeIf { scorable }
+        )
+    }
+
     private fun resolveSingleOption(
         obj: JsonObject,
         optionById: Map<Long, ScaleOptionScore>,
@@ -156,6 +185,28 @@ internal object ScaleAnswerEvaluator {
             }
         }
         throw answerFormatError("Multi choice answer requires optionIds or optionKeys")
+    }
+
+    private fun resolvePrefixedOption(
+        obj: JsonObject,
+        fieldPrefix: String,
+        optionKeyPrefix: String,
+        optionById: Map<Long, ScaleOptionScore>,
+        optionByKey: Map<String, ScaleOptionScore>
+    ): ScaleOptionScore {
+        val optionId = objNumber(obj, "${fieldPrefix}OptionId")?.toLong()
+        val selectedById = optionId?.let { id ->
+            optionById[id] ?: throw answerFormatError("${fieldPrefix}OptionId=$id not found")
+        }
+        val selected = selectedById ?: objString(obj, "${fieldPrefix}OptionKey")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { key -> optionByKey[key] ?: throw answerFormatError("${fieldPrefix}OptionKey=$key not found") }
+            ?: throw answerFormatError("TESS item answer requires ${fieldPrefix}OptionId or ${fieldPrefix}OptionKey")
+        if (!selected.optionKey.startsWith(optionKeyPrefix)) {
+            throw answerFormatError("TESS ${fieldPrefix} option must start with $optionKeyPrefix")
+        }
+        return selected
     }
 
     private fun reverseScore(score: BigDecimal, options: List<ScaleOptionScore>): BigDecimal {
