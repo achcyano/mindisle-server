@@ -168,4 +168,43 @@ class ScaleScoringEngineTest {
         )
         assertTrue(result.resultFlags.contains("EPQ_NORM_PENDING_GENDER"))
     }
+
+    @Test
+    fun tessShouldScoreSeverityOnlyAndReturnDrugRelationMetrics() {
+        val questions = listOf(
+            ScoreQuestionRow(1, "q1_severity", "neurologic", true),
+            ScoreQuestionRow(2, "q1_relation", "neurologic", false),
+            ScoreQuestionRow(3, "q2_severity", "autonomic", true),
+            ScoreQuestionRow(4, "q2_relation", "autonomic", false),
+            ScoreQuestionRow(5, "q3_severity", "autonomic", true),
+            ScoreQuestionRow(6, "q3_relation", "autonomic", false)
+        )
+        val answers = listOf(
+            ScoreAnswerRow(1, 3.toBigDecimal(), """{"optionKey":"sev_3","score":3}"""),
+            ScoreAnswerRow(2, null, """{"optionKey":"rel_3","score":3}"""),
+            ScoreAnswerRow(3, 2.toBigDecimal(), """{"optionKey":"sev_2","score":2}"""),
+            ScoreAnswerRow(4, null, """{"optionKey":"rel_1","score":1}"""),
+            ScoreAnswerRow(5, 0.toBigDecimal(), """{"optionKey":"sev_0","score":0}"""),
+            ScoreAnswerRow(6, null, """{"optionKey":"rel_0","score":0}""")
+        )
+
+        val result = ScaleScoringEngine.compute(
+            method = ScaleScoringMethod.TESS,
+            ruleJson = "{}",
+            questions = questions,
+            answers = answers,
+            bands = emptyList()
+        )
+
+        assertEquals(5.0, result.totalScore?.toDouble())
+        assertEquals(3.0, result.dimensionScores["neurologic"]?.toDouble())
+        assertEquals(2.0, result.dimensionScores["autonomic"]?.toDouble())
+        assertEquals(2, result.overallMetrics["symptomCount"]?.toInt())
+        assertEquals(1, result.overallMetrics["highSymptomCount"]?.toInt())
+        assertEquals(1, result.overallMetrics["probableDrugRelatedCount"]?.toInt())
+        assertEquals(3.0, result.overallMetrics["maxSeverity"]?.toDouble())
+        assertEquals("mild", result.bandLevelCode)
+        assertTrue(result.resultFlags.contains("TESS_HIGH_SEVERITY"))
+        assertTrue(result.resultFlags.contains("TESS_PROBABLE_DRUG_RELATED"))
+    }
 }

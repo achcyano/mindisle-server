@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TESS 药物副反应自评</title>
+  <style>
+    :root {
+      --blue: #1d4ed8;
+      --blue-soft: #dbeafe;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --surface: #ffffff;
+      --bg: #f3f4f6;
+      --green-bg: #dcfce7;
+      --green: #166534;
+      --yellow-bg: #fef9c3;
+      --yellow: #854d0e;
+      --orange-bg: #ffedd5;
+      --orange: #9a3412;
+      --red-bg: #fee2e2;
+      --red: #991b1b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .page {
+      width: min(100%, 540px);
+      margin: 0 auto;
+      padding: 24px 16px calc(28px + env(safe-area-inset-bottom));
+    }
+    .header {
+      background: var(--blue);
+      color: white;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 10px 24px rgba(29, 78, 216, 0.18);
+      margin-bottom: 16px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.35;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+    .header p {
+      margin: 4px 0 0;
+      color: #bfdbfe;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .assistant {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      background: var(--surface);
+      border-left: 4px solid #3b82f6;
+      border-radius: 12px;
+      padding: 15px;
+      margin-bottom: 16px;
+      box-shadow: 0 8px 20px rgba(15, 23, 42, 0.07);
+    }
+    .assistant-mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--blue-soft);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      flex: 0 0 auto;
+    }
+    .assistant-text {
+      white-space: pre-line;
+      font-size: 14px;
+      line-height: 1.7;
+      color: #374151;
+    }
+    .progress-box { margin-bottom: 16px; }
+    .progress-line {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 7px;
+    }
+    .progress-track {
+      height: 8px;
+      background: #e5e7eb;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0;
+      background: #3b82f6;
+      transition: width 180ms ease;
+    }
+    .panel {
+      background: var(--surface);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 8px 20px rgba(15, 23, 42, 0.07);
+      margin-bottom: 14px;
+    }
+    .item-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .system-pill {
+      background: var(--blue-soft);
+      color: var(--blue);
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .symptom-name {
+      font-weight: 800;
+      font-size: 16px;
+    }
+    .symptom-en {
+      color: #9ca3af;
+      font-size: 12px;
+    }
+    .caption {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .option-list {
+      display: grid;
+      gap: 9px;
+    }
+    button {
+      appearance: none;
+      border: 0;
+      font: inherit;
+    }
+    .primary-button {
+      width: 100%;
+      min-height: 48px;
+      background: #2563eb;
+      color: white;
+      border-radius: 12px;
+      font-weight: 800;
+      box-shadow: 0 8px 18px rgba(37, 99, 235, 0.2);
+      transition: background 150ms ease, transform 150ms ease;
+    }
+    .primary-button:active,
+    .ghost-button:active,
+    .option-button:active {
+      transform: scale(0.99);
+    }
+    .ghost-button {
+      width: 100%;
+      min-height: 46px;
+      background: #e5e7eb;
+      color: #374151;
+      border-radius: 12px;
+      font-weight: 800;
+    }
+    .option-button {
+      width: 100%;
+      min-height: 44px;
+      padding: 10px 16px;
+      border: 2px solid var(--line);
+      border-radius: 8px;
+      text-align: left;
+      font-weight: 750;
+      font-size: 14px;
+      color: #374151;
+      background: #f9fafb;
+    }
+    .option-button:disabled,
+    .primary-button:disabled,
+    .ghost-button:disabled {
+      opacity: 0.55;
+    }
+    .severity-0 { background: var(--green-bg); border-color: #4ade80; color: var(--green); }
+    .severity-1 { background: var(--yellow-bg); border-color: #facc15; color: var(--yellow); }
+    .severity-2 { background: var(--orange-bg); border-color: #fb923c; color: var(--orange); }
+    .severity-3,
+    .severity-4 { background: var(--red-bg); border-color: #f87171; color: var(--red); }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    .metric {
+      border-radius: 10px;
+      padding: 12px 8px;
+      text-align: center;
+      background: #eff6ff;
+    }
+    .metric strong {
+      display: block;
+      color: var(--blue);
+      font-size: 24px;
+      line-height: 1.1;
+      margin-bottom: 5px;
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .metric.warn { background: #fff7ed; }
+    .metric.warn strong { color: var(--orange); }
+    .metric.danger { background: #fef2f2; }
+    .metric.danger strong { color: var(--red); }
+    .section-title {
+      margin: 0 0 12px;
+      font-size: 16px;
+      line-height: 1.4;
+      font-weight: 800;
+    }
+    .detail-group { margin-top: 12px; }
+    .detail-group:first-of-type { margin-top: 0; }
+    .group-name {
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+    .detail-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f4f6;
+      align-items: center;
+    }
+    .detail-row:last-child { border-bottom: 0; }
+    .detail-row-name {
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    .badges {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .badge {
+      border-radius: 999px;
+      padding: 3px 7px;
+      font-size: 12px;
+      background: #e0f2fe;
+      color: #0369a1;
+      white-space: nowrap;
+    }
+    .badge.hot {
+      background: var(--red-bg);
+      color: var(--red);
+    }
+    .empty {
+      text-align: center;
+      color: var(--green);
+      background: var(--green-bg);
+      border: 1px solid #86efac;
+      border-radius: 12px;
+      padding: 16px;
+      line-height: 1.6;
+      margin-bottom: 14px;
+    }
+    .error {
+      color: var(--red);
+      background: var(--red-bg);
+      border: 1px solid #fca5a5;
+      border-radius: 12px;
+      padding: 14px;
+      line-height: 1.6;
+      margin-bottom: 14px;
+      font-size: 14px;
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="header">
+      <h1>TESS 药物副反应自评</h1>
+      <p>Treatment Emergent Symptom Scale</p>
+    </section>
+
+    <section class="assistant">
+      <div class="assistant-mark">AI</div>
+      <div id="aiMessage" class="assistant-text"></div>
+    </section>
+
+    <section id="errorBox" class="error hidden"></section>
+
+    <section id="progressBox" class="progress-box hidden">
+      <div class="progress-line">
+        <span>评估进度</span>
+        <span id="progressText">1 / 15</span>
+      </div>
+      <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+    </section>
+
+    <section id="introView">
+      <button id="startButton" class="primary-button" type="button">开始评估</button>
+    </section>
+
+    <section id="assessView" class="panel hidden">
+      <div class="item-title">
+        <span id="itemSystem" class="system-pill"></span>
+        <span id="itemName" class="symptom-name"></span>
+        <span id="itemNameEn" class="symptom-en"></span>
+      </div>
+      <p id="stepCaption" class="caption"></p>
+      <div id="options" class="option-list"></div>
+    </section>
+
+    <section id="reportView" class="hidden">
+      <div class="panel">
+        <h2 class="section-title">评估报告摘要</h2>
+        <div class="summary-grid">
+          <div class="metric"><strong id="totalSeverity">0</strong><span>严重程度总分</span></div>
+          <div class="metric warn"><strong id="symptomCount">0</strong><span>阳性症状数</span></div>
+          <div class="metric danger"><strong id="highCount">0</strong><span>需关注症状</span></div>
+        </div>
+      </div>
+      <div id="highPanel" class="panel hidden">
+        <h3 class="section-title">需要告知医生的症状</h3>
+        <div id="highItems"></div>
+      </div>
+      <div id="detailPanel" class="panel hidden">
+        <h3 class="section-title">症状详情（按系统）</h3>
+        <div id="detailItems"></div>
+      </div>
+      <div id="emptyPanel" class="empty hidden">未发现明显药物副反应，请继续按医嘱服药。</div>
+      <button id="restartButton" class="ghost-button hidden" type="button">重新评估</button>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      const SCALE_CODE = "TESS";
+      const API_BASE = "/api/v1";
+      const INTRO = "您好！我是您的用药助手\n\n接下来我会逐一询问您在服药期间是否出现了一些不适症状。\n\n请根据您过去一周的实际感受如实回答，这将帮助医生更好地了解您的用药情况。\n\n准备好了吗？";
+      const COMPLETE = "评估完成！\n\n感谢您认真完成本次评估。结果已记录，医生将在复诊时查看您的报告。\n\n如有任何不适加重，请立即联系您的医生或前往急诊。";
+
+      let accessToken = readTokenFromHash();
+      let scale = null;
+      let session = null;
+      let items = [];
+      let answersByQuestionId = {};
+      let severityByItem = {};
+      let relationByItem = {};
+      let phase = "intro";
+      let step = "severity";
+      let currentIndex = 0;
+      let busy = false;
+      const requestedSessionId = new URLSearchParams(window.location.search).get("sessionId");
+
+      const els = {
+        aiMessage: document.getElementById("aiMessage"),
+        errorBox: document.getElementById("errorBox"),
+        progressBox: document.getElementById("progressBox"),
+        progressText: document.getElementById("progressText"),
+        progressFill: document.getElementById("progressFill"),
+        introView: document.getElementById("introView"),
+        assessView: document.getElementById("assessView"),
+        reportView: document.getElementById("reportView"),
+        startButton: document.getElementById("startButton"),
+        itemSystem: document.getElementById("itemSystem"),
+        itemName: document.getElementById("itemName"),
+        itemNameEn: document.getElementById("itemNameEn"),
+        stepCaption: document.getElementById("stepCaption"),
+        options: document.getElementById("options"),
+        totalSeverity: document.getElementById("totalSeverity"),
+        symptomCount: document.getElementById("symptomCount"),
+        highCount: document.getElementById("highCount"),
+        highPanel: document.getElementById("highPanel"),
+        highItems: document.getElementById("highItems"),
+        detailPanel: document.getElementById("detailPanel"),
+        detailItems: document.getElementById("detailItems"),
+        emptyPanel: document.getElementById("emptyPanel"),
+        restartButton: document.getElementById("restartButton")
+      };
+
+      els.startButton.addEventListener("click", startAssessment);
+      els.restartButton.addEventListener("click", restartAssessment);
+
+      init();
+
+      async function init() {
+        setMessage(INTRO);
+        if (!accessToken) {
+          showError("缺少访问令牌，请从 App 内重新打开本页面。");
+          els.startButton.disabled = true;
+          return;
+        }
+        try {
+          scale = await apiGet(`/scales/${SCALE_CODE}`);
+          items = buildTessItems(scale.questions || []);
+          if (items.length === 0) {
+            throw new Error("TESS 题目配置为空");
+          }
+          if (requestedSessionId) {
+            await loadSession(requestedSessionId);
+            if (session.status === "SUBMITTED") {
+              phase = "report";
+              setMessage(COMPLETE);
+              renderReport(true);
+            } else {
+              phase = "assessing";
+              if (resumeFromNextRequiredStep()) {
+                renderAssess();
+              } else {
+                await submitSession();
+              }
+            }
+          }
+          render();
+        } catch (error) {
+          showError(error.message || "页面加载失败");
+          els.startButton.disabled = true;
+        }
+      }
+
+      async function startAssessment() {
+        if (busy) return;
+        clearError();
+        setBusy(true);
+        try {
+          const data = await apiPost(`/scales/${scale.scaleId}/sessions`, {});
+          await loadSession(data.session.sessionId);
+          phase = "assessing";
+          if (resumeFromNextRequiredStep()) {
+            render();
+          } else {
+            await submitSession();
+          }
+        } catch (error) {
+          showError(error.message || "无法开始评估");
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function restartAssessment() {
+        clearError();
+        session = null;
+        answersByQuestionId = {};
+        severityByItem = {};
+        relationByItem = {};
+        currentIndex = 0;
+        step = "severity";
+        phase = "intro";
+        setMessage(INTRO);
+        render();
+      }
+
+      async function loadSession(sessionId) {
+        const detail = await apiGet(`/scales/sessions/${sessionId}`);
+        session = detail.session;
+        answersByQuestionId = {};
+        severityByItem = {};
+        relationByItem = {};
+        (detail.answers || []).forEach(answer => {
+          answersByQuestionId[answer.questionId] = answer;
+        });
+        items.forEach(item => {
+          const severityAnswer = answersByQuestionId[item.severityQuestion.questionId];
+          const relationAnswer = answersByQuestionId[item.relationQuestion.questionId];
+          if (severityAnswer) {
+            severityByItem[item.id] = optionScore(severityAnswer.answer, item.severityQuestion);
+          }
+          if (relationAnswer) {
+            relationByItem[item.id] = optionScore(relationAnswer.answer, item.relationQuestion);
+          }
+        });
+      }
+
+      async function handleSeverity(value) {
+        if (busy) return;
+        const item = items[currentIndex];
+        setBusy(true);
+        try {
+          await saveAnswer(item.severityQuestion, value);
+          severityByItem[item.id] = value;
+          if (value === 0) {
+            await saveAnswer(item.relationQuestion, 0);
+            relationByItem[item.id] = 0;
+            await moveNext();
+          } else {
+            step = "relation";
+            setMessage(relationPrompt(item));
+            renderAssess();
+          }
+        } catch (error) {
+          showError(error.message || "保存失败");
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      async function handleRelation(value) {
+        if (busy) return;
+        const item = items[currentIndex];
+        setBusy(true);
+        try {
+          await saveAnswer(item.relationQuestion, value);
+          relationByItem[item.id] = value;
+          if ((severityByItem[item.id] || 0) >= 3) {
+            setMessage(`您报告「${item.name}」达到中度或以上，建议您及时告知您的主治医生。`);
+            await delay(900);
+          }
+          await moveNext();
+        } catch (error) {
+          showError(error.message || "保存失败");
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      async function moveNext() {
+        step = "severity";
+        if (!resumeFromNextRequiredStep()) {
+          await submitSession();
+          return;
+        }
+        renderAssess();
+      }
+
+      async function submitSession() {
+        await apiPost(`/scales/sessions/${session.sessionId}/submit`, {});
+        await loadSession(session.sessionId);
+        phase = "report";
+        setMessage(COMPLETE);
+        renderReport(false);
+        render();
+      }
+
+      async function saveAnswer(question, scoreValue) {
+        const option = (question.options || []).find(opt => Number(opt.scoreValue) === Number(scoreValue));
+        if (!option) {
+          throw new Error("题目选项配置错误");
+        }
+        const data = await apiPut(`/scales/sessions/${session.sessionId}/answers/${question.questionId}`, {
+          answer: { optionId: option.optionId }
+        });
+        answersByQuestionId[question.questionId] = {
+          questionId: question.questionId,
+          answer: { optionId: option.optionId, optionKey: option.optionKey, score: option.scoreValue },
+          numericScore: data.numericScore,
+          updatedAt: data.updatedAt
+        };
+        session.progress = data.progress;
+      }
+
+      function render() {
+        els.introView.classList.toggle("hidden", phase !== "intro");
+        els.assessView.classList.toggle("hidden", phase !== "assessing");
+        els.reportView.classList.toggle("hidden", phase !== "report");
+        els.progressBox.classList.toggle("hidden", phase !== "assessing");
+        if (phase === "assessing") renderAssess();
+        if (phase === "report") renderReport(Boolean(requestedSessionId));
+      }
+
+      function renderAssess() {
+        const item = items[currentIndex];
+        const percent = Math.round((currentIndex / items.length) * 100);
+        els.progressText.textContent = `${currentIndex + 1} / ${items.length}`;
+        els.progressFill.style.width = `${percent}%`;
+        els.itemSystem.textContent = item.system;
+        els.itemName.textContent = item.name;
+        els.itemNameEn.textContent = item.nameEn ? `(${item.nameEn})` : "";
+        els.stepCaption.textContent = step === "severity" ? "请选择严重程度：" : "与药物的关联性：";
+        const question = step === "severity" ? item.severityQuestion : item.relationQuestion;
+        els.options.innerHTML = "";
+        (question.options || []).forEach(option => {
+          const value = Number(option.scoreValue || 0);
+          const button = document.createElement("button");
+          button.type = "button";
+          button.disabled = busy;
+          button.textContent = option.label;
+          button.className = step === "severity"
+            ? `option-button severity-${value}`
+            : "option-button";
+          button.addEventListener("click", () => {
+            if (step === "severity") {
+              handleSeverity(value);
+            } else {
+              handleRelation(value);
+            }
+          });
+          els.options.appendChild(button);
+        });
+      }
+
+      function renderReport(readonly) {
+        const symptomItems = items.filter(item => (severityByItem[item.id] || 0) > 0);
+        const highItems = items.filter(item => (severityByItem[item.id] || 0) >= 3);
+        const total = items.reduce((sum, item) => sum + (severityByItem[item.id] || 0), 0);
+        els.totalSeverity.textContent = String(total);
+        els.symptomCount.textContent = String(symptomItems.length);
+        els.highCount.textContent = String(highItems.length);
+        els.highPanel.classList.toggle("hidden", highItems.length === 0);
+        els.emptyPanel.classList.toggle("hidden", symptomItems.length !== 0);
+        els.detailPanel.classList.toggle("hidden", symptomItems.length === 0);
+        els.restartButton.classList.toggle("hidden", readonly);
+        els.highItems.innerHTML = "";
+        highItems.forEach(item => {
+          els.highItems.appendChild(detailRow(item, true));
+        });
+        els.detailItems.innerHTML = "";
+        const bySystem = {};
+        symptomItems.forEach(item => {
+          if (!bySystem[item.system]) bySystem[item.system] = [];
+          bySystem[item.system].push(item);
+        });
+        Object.keys(bySystem).forEach(system => {
+          const group = document.createElement("div");
+          group.className = "detail-group";
+          const title = document.createElement("div");
+          title.className = "group-name";
+          title.textContent = system;
+          group.appendChild(title);
+          bySystem[system].forEach(item => group.appendChild(detailRow(item, false)));
+          els.detailItems.appendChild(group);
+        });
+      }
+
+      function detailRow(item, hotOnly) {
+        const row = document.createElement("div");
+        row.className = "detail-row";
+        const name = document.createElement("div");
+        name.className = "detail-row-name";
+        name.textContent = item.name;
+        const badges = document.createElement("div");
+        badges.className = "badges";
+        const severity = document.createElement("span");
+        severity.className = hotOnly ? "badge hot" : "badge";
+        severity.textContent = `严重 ${severityByItem[item.id] || 0}`;
+        badges.appendChild(severity);
+        if (!hotOnly) {
+          const relation = document.createElement("span");
+          relation.className = "badge";
+          relation.textContent = relationLabel(relationByItem[item.id] || 0);
+          badges.appendChild(relation);
+        }
+        row.appendChild(name);
+        row.appendChild(badges);
+        return row;
+      }
+
+      function buildTessItems(questions) {
+        const groups = {};
+        questions.forEach(question => {
+          const meta = question.meta || {};
+          const id = meta.tessItemId;
+          const kind = meta.kind;
+          if (!id || !kind) return;
+          if (!groups[id]) {
+            groups[id] = {
+              id,
+              system: meta.system || question.dimension || "",
+              name: question.stem,
+              nameEn: meta.nameEn || "",
+              description: meta.description || question.note || "",
+              severityQuestion: null,
+              relationQuestion: null
+            };
+          }
+          if (kind === "severity") groups[id].severityQuestion = question;
+          if (kind === "relation") groups[id].relationQuestion = question;
+        });
+        return Object.keys(groups)
+          .map(key => groups[key])
+          .filter(item => item.severityQuestion && item.relationQuestion)
+          .sort((a, b) => a.id - b.id);
+      }
+
+      function nextUnansweredIndex() {
+        const index = items.findIndex(item => {
+          const severity = severityByItem[item.id];
+          return severity === undefined || (severity > 0 && relationByItem[item.id] === undefined);
+        });
+        return index;
+      }
+
+      function resumeFromNextRequiredStep() {
+        const nextIndex = nextUnansweredIndex();
+        if (nextIndex < 0) {
+          return false;
+        }
+        currentIndex = nextIndex;
+        const item = items[currentIndex];
+        const severity = severityByItem[item.id];
+        step = severity > 0 && relationByItem[item.id] === undefined ? "relation" : "severity";
+        setMessage(step === "relation" ? relationPrompt(item) : severityPrompt(item));
+        return true;
+      }
+
+      function optionScore(answer, question) {
+        if (!answer || !question) return undefined;
+        const optionId = answer.optionId;
+        const optionKey = answer.optionKey;
+        const option = (question.options || []).find(opt => {
+          return (optionId !== undefined && opt.optionId === optionId) ||
+            (optionKey !== undefined && opt.optionKey === optionKey);
+        });
+        return option ? Number(option.scoreValue || 0) : undefined;
+      }
+
+      function severityPrompt(item) {
+        return `关于「${item.name}」：\n\n${item.description}\n\n请问您目前有这种感觉吗？严重程度如何？`;
+      }
+
+      function relationPrompt(item) {
+        return `您认为「${item.name}」这个症状与您目前服用的药物有关吗？`;
+      }
+
+      function relationLabel(value) {
+        return ["无关", "可能有关", "很可能有关", "肯定有关"][Number(value)] || "无关";
+      }
+
+      function delay(ms) {
+        return new Promise(resolve => window.setTimeout(resolve, ms));
+      }
+
+      async function apiGet(path) {
+        return unwrap(await fetchJson(path, { method: "GET" }));
+      }
+
+      async function apiPost(path, body) {
+        return unwrap(await fetchJson(path, { method: "POST", body: JSON.stringify(body) }));
+      }
+
+      async function apiPut(path, body) {
+        return unwrap(await fetchJson(path, { method: "PUT", body: JSON.stringify(body) }));
+      }
+
+      async function fetchJson(path, init) {
+        const response = await fetch(API_BASE + path, {
+          ...init,
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          }
+        });
+        const text = await response.text();
+        const payload = text ? JSON.parse(text) : {};
+        if (!response.ok || (payload.code !== undefined && payload.code !== 0)) {
+          throw new Error(payload.message || `请求失败：${response.status}`);
+        }
+        return payload;
+      }
+
+      function unwrap(payload) {
+        return payload.data === undefined ? null : payload.data;
+      }
+
+      function readTokenFromHash() {
+        const raw = window.location.hash.replace(/^#/, "");
+        const params = new URLSearchParams(raw);
+        const token = params.get("accessToken") || params.get("token");
+        if (token) {
+          window.history.replaceState(null, document.title, window.location.pathname + window.location.search);
+        }
+        return token;
+      }
+
+      function setMessage(text) {
+        els.aiMessage.textContent = text;
+      }
+
+      function showError(message) {
+        els.errorBox.textContent = message;
+        els.errorBox.classList.remove("hidden");
+      }
+
+      function clearError() {
+        els.errorBox.textContent = "";
+        els.errorBox.classList.add("hidden");
+      }
+
+      function setBusy(value) {
+        busy = value;
+        els.startButton.disabled = value;
+        Array.from(document.querySelectorAll("button")).forEach(button => {
+          if (button.id !== "restartButton") button.disabled = value;
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

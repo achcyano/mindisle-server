@@ -49,6 +49,7 @@ import me.hztcm.mindisle.model.GroupingChangeItem
 import me.hztcm.mindisle.model.ListScaleHistoryResponse
 import me.hztcm.mindisle.model.ListDoctorPatientsQuery
 import me.hztcm.mindisle.model.PatientMetricSnapshot
+import me.hztcm.mindisle.model.ScaleDeliveryModeDto
 import me.hztcm.mindisle.model.ScaleHistoryItem
 import me.hztcm.mindisle.model.ScaleDimensionResult
 import me.hztcm.mindisle.model.ScaleResultResponse
@@ -510,6 +511,7 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                     val version = versionById[row[UserScaleSessionsTable.versionId].value]
                         ?: throw doctorInvalidArg("Version not found for session=$sessionId")
                     val result = resultBySessionId[sessionId]
+                    val delivery = parseScaleDelivery(parseDoctorJsonOrNull(version[ScaleVersionsTable.configJson]))
                     ScaleHistoryItem(
                         sessionId = sessionId,
                         scaleId = scale[ScalesTable.id].value,
@@ -520,7 +522,9 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                         progress = row[UserScaleSessionsTable.progress],
                         totalScore = result?.get(UserScaleResultsTable.totalScore)?.toDouble(),
                         submittedAt = row[UserScaleSessionsTable.submittedAt]?.toIsoInstant(),
-                        updatedAt = row[UserScaleSessionsTable.updatedAt].toIsoInstant()
+                        updatedAt = row[UserScaleSessionsTable.updatedAt].toIsoInstant(),
+                        deliveryMode = delivery.mode,
+                        webPath = delivery.historyWebPath(sessionId)
                     )
                 },
                 nextCursor = if (hasMore) page.last()[UserScaleSessionsTable.id].value.toString() else null
@@ -750,6 +754,17 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         val latestAssessmentAt: LocalDateTime?,
         val latestScl90Score: Double?
     )
+
+    private data class ScaleDeliverySnapshot(
+        val mode: ScaleDeliveryModeDto = ScaleDeliveryModeDto.NATIVE,
+        val webPath: String? = null
+    ) {
+        fun historyWebPath(sessionId: Long): String? {
+            val path = webPath ?: return null
+            val separator = if (path.contains("?")) "&" else "?"
+            return "$path${separator}sessionId=$sessionId"
+        }
+    }
 
     @Serializable
     private data class PatientListCursorPayload(
@@ -1069,6 +1084,23 @@ $templateReport
             return null
         }
         return runCatching { deps.json.parseToJsonElement(raw) }.getOrNull()
+    }
+
+    private fun parseScaleDelivery(config: JsonElement?): ScaleDeliverySnapshot {
+        val configObj = config as? JsonObject ?: return ScaleDeliverySnapshot()
+        val deliveryObj = configObj["delivery"] as? JsonObject ?: return ScaleDeliverySnapshot()
+        val modeText = (deliveryObj["mode"] as? JsonPrimitive)?.content?.trim()?.uppercase()
+        val mode = if (modeText == ScaleDeliveryModeDto.WEBVIEW.name) {
+            ScaleDeliveryModeDto.WEBVIEW
+        } else {
+            ScaleDeliveryModeDto.NATIVE
+        }
+        val webPath = (deliveryObj["webPath"] as? JsonPrimitive)
+            ?.content
+            ?.trim()
+            ?.takeIf { it.startsWith("/") }
+            ?.takeIf { mode == ScaleDeliveryModeDto.WEBVIEW }
+        return ScaleDeliverySnapshot(mode = mode, webPath = webPath)
     }
 
     private fun parseDoubleMap(element: JsonElement?): Map<String, Double> {

@@ -92,6 +92,7 @@ internal object ScaleScoringEngine {
             ScaleScoringMethod.PSQI -> computePsqi(questions, scoreByQuestionId, answerByQuestionId)
             ScaleScoringMethod.SCL90 -> computeScl90(totalScore, questions, scoreByQuestionId)
             ScaleScoringMethod.EPQ -> computeEpq(questions, scoreByQuestionId, userGender, ruleObj)
+            ScaleScoringMethod.TESS -> computeTess(questions, scoreByQuestionId, answerByQuestionId)
         }
 
         val resolvedTotal = methodResult.totalScore ?: totalScore
@@ -425,6 +426,65 @@ internal object ScaleScoringEngine {
         )
     }
 
+    private fun computeTess(
+        questions: List<ScoreQuestionRow>,
+        scoreByQuestionId: Map<Long, BigDecimal>,
+        answersByQuestionId: Map<Long, ScoreAnswerRow>
+    ): MethodScoreResult {
+        val severityQuestions = questions.filter { it.questionKey.endsWith("_severity") }
+        val relationQuestions = questions.filter { it.questionKey.endsWith("_relation") }
+        val severityScores = severityQuestions.map { question ->
+            question to (scoreByQuestionId[question.questionId] ?: BigDecimal.ZERO)
+        }
+        val totalScore = severityScores.sumOfOrNull { (_, score) -> score } ?: BigDecimal.ZERO
+        val dimensionScores = linkedMapOf<String, BigDecimal>()
+        severityScores.forEach { (question, score) ->
+            val dimension = question.dimension ?: return@forEach
+            dimensionScores[dimension] = (dimensionScores[dimension] ?: BigDecimal.ZERO) + score
+        }
+        val symptomCount = severityScores.count { (_, score) -> score > BigDecimal.ZERO }
+        val highSymptomCount = severityScores.count { (_, score) -> score >= BigDecimal("3") }
+        val maxSeverity = severityScores.maxOfOrNull { (_, score) -> score } ?: BigDecimal.ZERO
+        val probableDrugRelatedCount = relationQuestions.count { question ->
+            val score = answersByQuestionId[question.questionId]
+                ?.let { parseScoreFromAnswerJson(it.answerJson) }
+                ?: BigDecimal.ZERO
+            score >= BigDecimal("2")
+        }
+        val flags = buildList {
+            if (highSymptomCount > 0) add("TESS_HIGH_SEVERITY")
+            if (probableDrugRelatedCount > 0) add("TESS_PROBABLE_DRUG_RELATED")
+        }
+        val (levelCode, levelName) = when (totalScore.toInt()) {
+            0 -> "none" to "未见明显副反应"
+            in 1..14 -> "mild" to "轻度副反应"
+            in 15..29 -> "moderate" to "中度副反应"
+            else -> "high" to "副反应负担较高"
+        }
+        val dimensionNames = tessDimensionNames()
+        return MethodScoreResult(
+            totalScore = totalScore,
+            dimensionScores = dimensionScores,
+            overallMetrics = mapOf(
+                "symptomCount" to symptomCount.toBigDecimal(),
+                "highSymptomCount" to highSymptomCount.toBigDecimal(),
+                "probableDrugRelatedCount" to probableDrugRelatedCount.toBigDecimal(),
+                "maxSeverity" to maxSeverity
+            ),
+            dimensionResults = dimensionScores.entries.map { (key, score) ->
+                ScoreDimensionResultRow(
+                    dimensionKey = key,
+                    dimensionName = dimensionNames[key] ?: key,
+                    rawScore = score
+                )
+            },
+            resultFlags = flags,
+            bandLevelCode = levelCode,
+            bandLevelName = levelName,
+            resultText = "TESS 严重程度总分 ${totalScore.roundScale2()} 分，阳性症状 $symptomCount 项，中度及以上症状 $highSymptomCount 项，可能或很可能与药物相关 $probableDrugRelatedCount 项。"
+        )
+    }
+
     private fun parseRuleJson(ruleJson: String): JsonObject? {
         if (ruleJson.isBlank()) {
             return null
@@ -608,6 +668,17 @@ internal object ScaleScoringEngine {
             "paranoid_ideation" to "偏执",
             "psychoticism" to "精神病性",
             "additional" to "其他"
+        )
+    }
+
+    private fun tessDimensionNames(): Map<String, String> {
+        return mapOf(
+            "neurologic" to "神经系统",
+            "autonomic" to "自主神经",
+            "cardiovascular" to "心血管",
+            "digestive" to "消化系统",
+            "psychiatric_behavioral" to "精神行为",
+            "other" to "其他"
         )
     }
 

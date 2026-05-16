@@ -49,7 +49,8 @@ enum class ScaleScoringMethod {
     GAD7,
     PSQI,
     SCL90,
-    EPQ
+    EPQ,
+    TESS
 }
 
 enum class ScaleSessionStatus {

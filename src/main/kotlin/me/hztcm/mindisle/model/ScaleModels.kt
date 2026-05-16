@@ -56,6 +56,12 @@ enum class ScaleSessionStatusDto {
 }
 
 @Serializable
+enum class ScaleDeliveryModeDto {
+    NATIVE,
+    WEBVIEW
+}
+
+@Serializable
 data class ScaleListItem(
     val scaleId: Long,
     val code: String,
@@ -64,7 +70,9 @@ data class ScaleListItem(
     val status: ScaleStatusDto,
     val latestVersion: Int,
     val publishedAt: String? = null,
-    val lastCompletedAt: String? = null
+    val lastCompletedAt: String? = null,
+    val deliveryMode: ScaleDeliveryModeDto = ScaleDeliveryModeDto.NATIVE,
+    val webPath: String? = null
 )
 
 @Serializable
@@ -84,6 +92,8 @@ data class ScaleDetailResponse(
     val version: Int,
     val config: JsonElement? = null,
     val dimensions: List<ScaleDimensionDef> = emptyList(),
+    val deliveryMode: ScaleDeliveryModeDto = ScaleDeliveryModeDto.NATIVE,
+    val webPath: String? = null,
     val questions: List<ScaleQuestionItem>
 )
 
@@ -198,7 +208,9 @@ data class ScaleHistoryItem(
     val progress: Int,
     val totalScore: Double? = null,
     val submittedAt: String? = null,
-    val updatedAt: String
+    val updatedAt: String,
+    val deliveryMode: ScaleDeliveryModeDto = ScaleDeliveryModeDto.NATIVE,
+    val webPath: String? = null
 )
 
 @Serializable

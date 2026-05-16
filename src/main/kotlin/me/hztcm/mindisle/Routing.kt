@@ -16,6 +16,7 @@ import me.hztcm.mindisle.event.service.EventService
 import me.hztcm.mindisle.medication.api.registerMedicationRoutes
 import me.hztcm.mindisle.medication.service.MedicationService
 import me.hztcm.mindisle.scale.api.registerScaleRoutes
+import me.hztcm.mindisle.scale.api.registerScaleWebRoutes
 import me.hztcm.mindisle.scale.service.ScaleService
 import me.hztcm.mindisle.user.api.registerAuthRoutes
 import me.hztcm.mindisle.user.api.registerUserRoutes
@@ -37,6 +38,8 @@ fun Application.configureRouting(
         post("/test") {
             call.respondText("This is a test endpoint.")
         }
+
+        registerScaleWebRoutes()
 
         route("/api/v1") {
             registerAuthRoutes(userService)

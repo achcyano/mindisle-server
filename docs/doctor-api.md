@@ -198,8 +198,9 @@ Base URL: `/api/v1`
    - 仅允许查询当前绑定患者
    - 返回：`phone/fullName/gender/birthDate/heightCm/weightKg/waistCm/usesTcm/diseaseHistory`
 11. `GET /doctors/me/patients/{patientUserId}/scale-history?limit=20&cursor=<sessionId>`
-   - 与患者端 `GET /scales/history` 同口径（会话级历史列表）
-   - 返回字段：`items[].sessionId/scaleId/scaleCode/scaleName/versionId/version/progress/totalScore/submittedAt/updatedAt`、`nextCursor`
+     - 与患者端 `GET /scales/history` 同口径（会话级历史列表）
+     - 返回字段：`items[].sessionId/scaleId/scaleCode/scaleName/versionId/version/progress/totalScore/submittedAt/updatedAt/deliveryMode/webPath`、`nextCursor`
+     - WebView 量表（如 TESS）的 `webPath` 会带 `sessionId`，可由客户端直接打开记录页。
 12. `GET /doctors/me/patients/{patientUserId}/scales/sessions/{sessionId}/result`
    - 与患者端 `GET /scales/sessions/{sessionId}/result` 同口径，返回单次会话的评分结果与维度结果
    - 仅允许查询当前医生已绑定患者的会话

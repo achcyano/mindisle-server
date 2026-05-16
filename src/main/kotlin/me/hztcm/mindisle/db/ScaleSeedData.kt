@@ -13,7 +13,8 @@ object ScaleSeedData {
             buildGad7(),
             buildPsqi(),
             buildScl90(),
-            buildEpq88()
+            buildEpq88(),
+            buildTess()
         ).forEach(::seedScaleVersionIfAbsent)
     }
 
@@ -441,6 +442,70 @@ object ScaleSeedData {
         )
     }
 
+    private fun buildTess(): SeedScale {
+        val severityOptions = tessSeverityOptions()
+        val relationOptions = tessRelationOptions()
+        val questions = tessItems().flatMapIndexed { index, item ->
+            val order = index + 1
+            listOf(
+                SeedQuestion(
+                    questionKey = "q${order}_severity",
+                    orderNo = order * 2 - 1,
+                    stem = item.name,
+                    dimension = item.dimension,
+                    note = item.description,
+                    optionSetCode = "TESS_SEVERITY_0_4",
+                    metaJson = item.toMetaJson(order, "severity"),
+                    options = severityOptions
+                ),
+                SeedQuestion(
+                    questionKey = "q${order}_relation",
+                    orderNo = order * 2,
+                    stem = "${item.name}与目前服用药物的关联性",
+                    dimension = item.dimension,
+                    scorable = false,
+                    note = "若未出现该症状，网页会自动记录为无关。",
+                    optionSetCode = "TESS_RELATION_0_3",
+                    metaJson = item.toMetaJson(order, "relation"),
+                    options = relationOptions
+                )
+            )
+        }
+        return SeedScale(
+            code = "TESS",
+            name = "TESS 药物副反应自评",
+            description = "用于评估过去一周服药期间常见不适症状及其与药物的可能关联。",
+            version = 1,
+            method = ScaleScoringMethod.TESS,
+            ruleJson = "{}",
+            configJson = """
+                {
+                  "timeWindow": "过去一周",
+                  "delivery": {
+                    "mode": "WEBVIEW",
+                    "webPath": "/web/scales/TESS"
+                  },
+                  "defaultOptionSet": "TESS_SEVERITY_0_4",
+                  "dimensions": [
+                    {"key":"neurologic","name":"神经系统","min":0,"max":12},
+                    {"key":"autonomic","name":"自主神经","min":0,"max":12},
+                    {"key":"cardiovascular","name":"心血管","min":0,"max":8},
+                    {"key":"digestive","name":"消化系统","min":0,"max":8},
+                    {"key":"psychiatric_behavioral","name":"精神行为","min":0,"max":12},
+                    {"key":"other","name":"其他","min":0,"max":8}
+                  ]
+                }
+            """.trimIndent(),
+            bands = listOf(
+                SeedBand(null, BigDecimal.ZERO, BigDecimal.ZERO, "none", "未见明显副反应", "本次未报告明显药物副反应。"),
+                SeedBand(null, BigDecimal.ONE, BigDecimal("14"), "mild", "轻度副反应", "存在轻度不适，可继续观察并按医嘱随访。"),
+                SeedBand(null, BigDecimal("15"), BigDecimal("29"), "moderate", "中度副反应", "副反应负担中等，建议告知医生并结合用药情况评估。"),
+                SeedBand(null, BigDecimal("30"), BigDecimal("60"), "high", "副反应负担较高", "副反应负担较高，建议尽快联系医生评估。")
+            ),
+            questions = questions
+        )
+    }
+
     private fun likert0To3Options(): List<SeedOption> = listOf(
         SeedOption("opt_0", 0, "完全不会", BigDecimal.ZERO),
         SeedOption("opt_1", 1, "有几天", BigDecimal.ONE),
@@ -459,6 +524,39 @@ object ScaleSeedData {
         SeedOption("opt_3", 2, "中等", BigDecimal("3")),
         SeedOption("opt_4", 3, "偏重", BigDecimal("4")),
         SeedOption("opt_5", 4, "严重", BigDecimal("5"))
+    )
+
+    private fun tessSeverityOptions(): List<SeedOption> = listOf(
+        SeedOption("sev_0", 0, "0 - 无", BigDecimal.ZERO),
+        SeedOption("sev_1", 1, "1 - 轻微", BigDecimal.ONE),
+        SeedOption("sev_2", 2, "2 - 轻度", BigDecimal("2")),
+        SeedOption("sev_3", 3, "3 - 中度", BigDecimal("3")),
+        SeedOption("sev_4", 4, "4 - 重度", BigDecimal("4"))
+    )
+
+    private fun tessRelationOptions(): List<SeedOption> = listOf(
+        SeedOption("rel_0", 0, "0 - 无关", BigDecimal.ZERO),
+        SeedOption("rel_1", 1, "1 - 可能有关", BigDecimal.ONE),
+        SeedOption("rel_2", 2, "2 - 很可能有关", BigDecimal("2")),
+        SeedOption("rel_3", 3, "3 - 肯定有关", BigDecimal("3"))
+    )
+
+    private fun tessItems(): List<TessSeedItem> = listOf(
+        TessSeedItem("neurologic", "神经系统", "震颤", "Tremor", "手、脚或身体其他部位出现不自主抖动"),
+        TessSeedItem("neurologic", "神经系统", "静坐不能", "Akathisia", "感到坐立不安、无法静坐，有强烈的想动的冲动"),
+        TessSeedItem("neurologic", "神经系统", "肌强直", "Rigidity", "肌肉僵硬、活动不灵活"),
+        TessSeedItem("autonomic", "自主神经", "口干", "Dry Mouth", "口腔持续感到干燥，唾液减少"),
+        TessSeedItem("autonomic", "自主神经", "便秘", "Constipation", "排便次数减少或排便困难"),
+        TessSeedItem("autonomic", "自主神经", "出汗增多", "Sweating", "在没有运动或高温情况下出汗增多"),
+        TessSeedItem("cardiovascular", "心血管", "心跳加速", "Tachycardia", "感到心跳明显加快"),
+        TessSeedItem("cardiovascular", "心血管", "头晕（站立时）", "Orthostatic Hypotension", "站起来时感到头晕、眼前发黑"),
+        TessSeedItem("digestive", "消化系统", "恶心", "Nausea", "胃部不适、想呕吐的感觉"),
+        TessSeedItem("digestive", "消化系统", "食欲变化", "Appetite Change", "食欲明显增加或减少"),
+        TessSeedItem("psychiatric_behavioral", "精神行为", "嗜睡/镇静", "Sedation", "白天感到异常困倦、难以保持清醒"),
+        TessSeedItem("psychiatric_behavioral", "精神行为", "失眠", "Insomnia", "入睡困难或睡眠维持困难"),
+        TessSeedItem("psychiatric_behavioral", "精神行为", "焦虑/激越", "Anxiety/Agitation", "感到紧张不安、烦躁或坐立不安"),
+        TessSeedItem("other", "其他", "头痛", "Headache", "头部疼痛或压迫感"),
+        TessSeedItem("other", "其他", "体重增加", "Weight Gain", "服药后体重明显增加")
     )
 
     private fun scl90Stems(): List<String> = listOf(
@@ -690,3 +788,23 @@ private data class SeedBand(
     val levelName: String,
     val interpretation: String
 )
+
+private data class TessSeedItem(
+    val dimension: String,
+    val system: String,
+    val name: String,
+    val nameEn: String,
+    val description: String
+) {
+    fun toMetaJson(order: Int, kind: String): String {
+        return """
+            {
+              "tessItemId": $order,
+              "kind": "$kind",
+              "system": "$system",
+              "nameEn": "$nameEn",
+              "description": "$description"
+            }
+        """.trimIndent()
+    }
+}

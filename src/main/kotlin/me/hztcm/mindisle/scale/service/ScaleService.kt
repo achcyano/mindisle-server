@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
@@ -48,6 +49,7 @@ import me.hztcm.mindisle.model.ScaleAssistDoneEvent
 import me.hztcm.mindisle.model.ScaleAssistErrorEvent
 import me.hztcm.mindisle.model.ScaleAssistMetaEvent
 import me.hztcm.mindisle.model.ScaleAssistStreamRequest
+import me.hztcm.mindisle.model.ScaleDeliveryModeDto
 import me.hztcm.mindisle.model.ScaleDimensionDef
 import me.hztcm.mindisle.model.ScaleDimensionResult
 import me.hztcm.mindisle.model.ScaleDetailResponse
@@ -133,6 +135,17 @@ private data class ScaleAssistRound(
     val assistantText: String
 )
 
+private data class ScaleDelivery(
+    val mode: ScaleDeliveryModeDto = ScaleDeliveryModeDto.NATIVE,
+    val webPath: String? = null
+) {
+    fun historyWebPath(sessionId: Long): String? {
+        val path = webPath ?: return null
+        val separator = if (path.contains("?")) "&" else "?"
+        return "$path${separator}sessionId=$sessionId"
+    }
+}
+
 class ScaleService(
     private val config: LlmConfig,
     private val deepSeekClient: DeepSeekAliyunClient,
@@ -192,6 +205,7 @@ class ScaleService(
                 val scaleId = row[ScalesTable.id].value
                 val versionRow = latestVersionByScale[scaleId]
                     ?: throw scaleVersionNotFound("Published version not found for scale=$scaleId")
+                val delivery = parseDelivery(parseJsonOrNull(versionRow[ScaleVersionsTable.configJson]))
                 ScaleListItem(
                     scaleId = scaleId,
                     code = row[ScalesTable.code],
@@ -200,7 +214,9 @@ class ScaleService(
                     status = row[ScalesTable.status].toDto(),
                     latestVersion = versionRow[ScaleVersionsTable.version],
                     publishedAt = versionRow[ScaleVersionsTable.publishedAt]?.toIsoInstant(),
-                    lastCompletedAt = latestCompletedAtByScaleId[scaleId]
+                    lastCompletedAt = latestCompletedAtByScaleId[scaleId],
+                    deliveryMode = delivery.mode,
+                    webPath = delivery.webPath
                 )
             }
             val nextCursor = if (hasMore) page.lastOrNull()?.get(ScalesTable.id)?.value?.toString() else null
@@ -217,6 +233,7 @@ class ScaleService(
                 ScaleQuestionsTable.versionId eq versionRow[ScaleVersionsTable.id]
             }.orderBy(ScaleQuestionsTable.orderNo, SortOrder.ASC).toList()
             val config = parseJsonOrNull(versionRow[ScaleVersionsTable.configJson])
+            val delivery = parseDelivery(config)
 
             val questionIds = questions.map { it[ScaleQuestionsTable.id] }
             val optionsByQuestionId = if (questionIds.isEmpty()) {
@@ -239,6 +256,8 @@ class ScaleService(
                 version = versionRow[ScaleVersionsTable.version],
                 config = config,
                 dimensions = parseDimensions(config),
+                deliveryMode = delivery.mode,
+                webPath = delivery.webPath,
                 questions = questions.map { q ->
                     ScaleQuestionItem(
                         questionId = q[ScaleQuestionsTable.id].value,
@@ -655,6 +674,7 @@ class ScaleService(
                 val versionRow = versionById[row[UserScaleSessionsTable.versionId].value]
                     ?: throw invalidScaleArg("Version not found for session=$sessionId")
                 val resultRow = resultBySessionId[sessionId]
+                val delivery = parseDelivery(parseJsonOrNull(versionRow[ScaleVersionsTable.configJson]))
                 ScaleHistoryItem(
                     sessionId = sessionId,
                     scaleId = scaleRow[ScalesTable.id].value,
@@ -665,7 +685,9 @@ class ScaleService(
                     progress = row[UserScaleSessionsTable.progress],
                     totalScore = resultRow?.get(UserScaleResultsTable.totalScore)?.toDouble(),
                     submittedAt = row[UserScaleSessionsTable.submittedAt]?.toIsoInstant(),
-                    updatedAt = row[UserScaleSessionsTable.updatedAt].toIsoInstant()
+                    updatedAt = row[UserScaleSessionsTable.updatedAt].toIsoInstant(),
+                    deliveryMode = delivery.mode,
+                    webPath = delivery.historyWebPath(sessionId)
                 )
             }
             val nextCursor = if (hasMore) page.last()[UserScaleSessionsTable.id].value.toString() else null
@@ -985,6 +1007,22 @@ $draftText
                 interpretationHint = (obj["interpretationHint"] as? JsonPrimitive)?.contentOrNull()
             )
         }
+    }
+
+    private fun parseDelivery(config: JsonElement?): ScaleDelivery {
+        val configObj = config as? JsonObject ?: return ScaleDelivery()
+        val deliveryObj = configObj["delivery"] as? JsonObject ?: return ScaleDelivery()
+        val modeText = (deliveryObj["mode"] as? JsonPrimitive)?.contentOrNull()?.uppercase()
+        val mode = if (modeText == ScaleDeliveryModeDto.WEBVIEW.name) {
+            ScaleDeliveryModeDto.WEBVIEW
+        } else {
+            ScaleDeliveryModeDto.NATIVE
+        }
+        val webPath = (deliveryObj["webPath"] as? JsonPrimitive)
+            ?.contentOrNull()
+            ?.takeIf { it.startsWith("/") }
+            ?.takeIf { mode == ScaleDeliveryModeDto.WEBVIEW }
+        return ScaleDelivery(mode = mode, webPath = webPath)
     }
 
     private fun loadAssistContext(userId: Long, sessionId: Long, questionId: Long): ScaleAssistContext {
