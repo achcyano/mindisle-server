@@ -44,13 +44,28 @@ data class SmsProviderConfig(
 data class LlmConfig(
     val apiKey: String?,
     val baseUrl: String,
+    /** @deprecated Prefer [modelFlash] / [modelPro]; kept as fallback default. */
     val model: String,
+    val modelFlash: String,
+    val modelPro: String,
     val contextRecentMessages: Int,
     val replayTtlSeconds: Long,
     val requestTimeoutSeconds: Long,
     val maxUserMessageChars: Int,
-    val maxClientMessageIdChars: Int
-)
+    val maxClientMessageIdChars: Int,
+    val maxToolRounds: Int,
+    val summaryTriggerMessages: Int
+) {
+    fun resolveModel(tier: LlmModelTier): String = when (tier) {
+        LlmModelTier.FLASH -> modelFlash.ifBlank { model }
+        LlmModelTier.PRO -> modelPro.ifBlank { modelFlash.ifBlank { model } }
+    }
+}
+
+enum class LlmModelTier {
+    FLASH,
+    PRO
+}
 
 data class ScaleConfig(
     val openTextAnswerMinChars: Int,
@@ -97,16 +112,23 @@ object AppConfig {
         duplicatePolicy = dotenv["ALIYUN_SMS_DUPLICATE_POLICY"]?.toIntOrNull() ?: 1
     )
 
-    val llm = LlmConfig(
-        apiKey = dotenv["LLM_API_KEY"],
-        baseUrl = dotenv["LLM_BASE_URL"] ?: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model = dotenv["LLM_MODEL"] ?: "deepseek-v3.2",
-        contextRecentMessages = dotenv["LLM_CONTEXT_RECENT_MESSAGES"]?.toIntOrNull() ?: 12,
-        replayTtlSeconds = dotenv["LLM_REPLAY_TTL_SECONDS"]?.toLongOrNull() ?: 600L,
-        requestTimeoutSeconds = dotenv["LLM_REQUEST_TIMEOUT_SECONDS"]?.toLongOrNull() ?: 120L,
-        maxUserMessageChars = dotenv["LLM_MAX_USER_MESSAGE_CHARS"]?.toIntOrNull() ?: 8_000,
-        maxClientMessageIdChars = dotenv["LLM_MAX_CLIENT_MESSAGE_ID_CHARS"]?.toIntOrNull() ?: 128
-    )
+    val llm = run {
+        val fallbackModel = dotenv["LLM_MODEL"] ?: "deepseek-v4-flash"
+        LlmConfig(
+            apiKey = dotenv["LLM_API_KEY"],
+            baseUrl = dotenv["LLM_BASE_URL"] ?: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            model = fallbackModel,
+            modelFlash = dotenv["LLM_MODEL_FLASH"] ?: fallbackModel,
+            modelPro = dotenv["LLM_MODEL_PRO"] ?: "deepseek-v4-pro",
+            contextRecentMessages = dotenv["LLM_CONTEXT_RECENT_MESSAGES"]?.toIntOrNull() ?: 12,
+            replayTtlSeconds = dotenv["LLM_REPLAY_TTL_SECONDS"]?.toLongOrNull() ?: 600L,
+            requestTimeoutSeconds = dotenv["LLM_REQUEST_TIMEOUT_SECONDS"]?.toLongOrNull() ?: 120L,
+            maxUserMessageChars = dotenv["LLM_MAX_USER_MESSAGE_CHARS"]?.toIntOrNull() ?: 8_000,
+            maxClientMessageIdChars = dotenv["LLM_MAX_CLIENT_MESSAGE_ID_CHARS"]?.toIntOrNull() ?: 128,
+            maxToolRounds = dotenv["LLM_MAX_TOOL_ROUNDS"]?.toIntOrNull() ?: 4,
+            summaryTriggerMessages = dotenv["LLM_SUMMARY_TRIGGER_MESSAGES"]?.toIntOrNull() ?: 16
+        )
+    }
 
     val scale = ScaleConfig(
         openTextAnswerMinChars = dotenv["SCALE_OPEN_TEXT_ANSWER_MIN_CHARS"]?.toIntOrNull() ?: 1,

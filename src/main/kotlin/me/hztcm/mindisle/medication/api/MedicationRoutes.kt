@@ -14,13 +14,18 @@ import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
+import me.hztcm.mindisle.medication.service.DoseLogService
 import me.hztcm.mindisle.medication.service.MedicationService
 import me.hztcm.mindisle.model.ApiResponse
 import me.hztcm.mindisle.model.CreateMedicationRequest
+import me.hztcm.mindisle.model.DoseCheckInRequest
 import me.hztcm.mindisle.model.UpdateMedicationRequest
 import me.hztcm.mindisle.security.UserPrincipal
 
-fun Route.registerMedicationRoutes(service: MedicationService) {
+fun Route.registerMedicationRoutes(
+    service: MedicationService,
+    doseLogService: DoseLogService? = null
+) {
     authenticate("auth-jwt") {
         route("/users/me/medications") {
             post {
@@ -53,6 +58,18 @@ fun Route.registerMedicationRoutes(service: MedicationService) {
                 val medicationId = call.requirePathLong("medicationId")
                 service.deleteMedication(call.requireUserId(), medicationId)
                 call.respond(ApiResponse<Unit>())
+            }
+
+            get("/today-doses") {
+                val svc = doseLogService
+                    ?: throw AppException(ErrorCodes.INVALID_REQUEST, "Dose log unavailable", HttpStatusCode.NotImplemented)
+                call.respond(ApiResponse(data = svc.todayPlan(call.requireUserId())))
+            }
+            post("/dose-checkins") {
+                val svc = doseLogService
+                    ?: throw AppException(ErrorCodes.INVALID_REQUEST, "Dose log unavailable", HttpStatusCode.NotImplemented)
+                val data = svc.checkIn(call.requireUserId(), call.receive())
+                call.respond(HttpStatusCode.Created, ApiResponse(data = data))
             }
         }
     }

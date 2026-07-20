@@ -27,9 +27,11 @@ data class GenerationOwnership(
 )
 
 internal data class GenerationContext(
+    val userId: Long,
     val conversationId: Long,
     val currentUserMessage: String,
     val temperature: Double?,
     val maxTokens: Int?,
-    val messages: List<ChatMessage>
+    val messages: List<ChatMessage>,
+    val summary: String? = null
 )

@@ -65,11 +65,23 @@ object DatabaseFactory {
                 UserScaleSessionsTable,
                 UserScaleAnswersTable,
                 UserScaleAnswerRecordsTable,
-                UserScaleResultsTable
+                UserScaleResultsTable,
+                EmaEntriesTable,
+                MedicationDoseLogsTable,
+                PatientStateSnapshotsTable,
+                AiNlpFeaturesTable,
+                InterventionModulesTable,
+                InterventionDeliveriesTable,
+                InterventionFeedbackTable,
+                UiTasksTable,
+                SafetyAlertsTable,
+                AppUsageEventsTable
             )
             ScaleSeedData.seedDefaultsIfEmpty()
+            InterventionSeedData.seedDefaultsIfEmpty()
         }
     }
+
 
     suspend fun <T> dbQuery(block: Transaction.() -> T): T =
         newSuspendedTransaction(Dispatchers.IO, database, statement = block)

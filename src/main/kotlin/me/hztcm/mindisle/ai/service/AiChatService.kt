@@ -13,12 +13,15 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import me.hztcm.mindisle.ai.agent.AiAgentOrchestrator
 import me.hztcm.mindisle.ai.client.ChatMessage
 import me.hztcm.mindisle.ai.client.DeepSeekAliyunClient
 import me.hztcm.mindisle.ai.client.UsageMetrics
+import me.hztcm.mindisle.ai.context.PatientContextAssembler
 import me.hztcm.mindisle.common.AppException
 import me.hztcm.mindisle.common.ErrorCodes
 import me.hztcm.mindisle.config.LlmConfig
+import me.hztcm.mindisle.config.LlmModelTier
 import me.hztcm.mindisle.db.AiConversationsTable
 import me.hztcm.mindisle.db.AiGenerationStatus
 import me.hztcm.mindisle.db.AiGenerationsTable
@@ -26,6 +29,8 @@ import me.hztcm.mindisle.db.AiMessageRole
 import me.hztcm.mindisle.db.AiMessagesTable
 import me.hztcm.mindisle.db.AiStreamEventsTable
 import me.hztcm.mindisle.db.DatabaseFactory
+import me.hztcm.mindisle.db.RiskLevel
+import me.hztcm.mindisle.db.UiTaskType
 import me.hztcm.mindisle.db.UsersTable
 import me.hztcm.mindisle.model.AssistantOptionDto
 import me.hztcm.mindisle.model.ConversationListItem
@@ -39,8 +44,15 @@ import me.hztcm.mindisle.model.StreamDoneEvent
 import me.hztcm.mindisle.model.StreamErrorEvent
 import me.hztcm.mindisle.model.StreamMetaEvent
 import me.hztcm.mindisle.model.StreamOptionsEvent
+import me.hztcm.mindisle.model.StreamToolCallEvent
+import me.hztcm.mindisle.model.StreamToolResultEvent
+import me.hztcm.mindisle.model.StreamUiActionEvent
 import me.hztcm.mindisle.model.StreamUsageEvent
 import me.hztcm.mindisle.model.UpdateConversationTitleResponse
+import me.hztcm.mindisle.safety.service.SafetyAlertService
+import me.hztcm.mindisle.safety.service.SafetyScanner
+import me.hztcm.mindisle.task.service.UiTaskService
+
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
@@ -60,7 +72,12 @@ private const val AUTO_TITLE_MAX_CHARS = 20
 
 class AiChatService(
     private val config: LlmConfig,
-    private val deepSeekClient: DeepSeekAliyunClient
+    private val deepSeekClient: DeepSeekAliyunClient,
+    private val contextAssembler: PatientContextAssembler? = null,
+    private val agentOrchestrator: AiAgentOrchestrator? = null,
+    private val nlpService: AiNlpService? = null,
+    private val safetyAlertService: SafetyAlertService? = null,
+    private val uiTaskService: UiTaskService? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private val optionResolver = AiOptionResolver(deepSeekClient, json)
@@ -68,6 +85,7 @@ class AiChatService(
     private val generationJobs = ConcurrentHashMap<String, Job>()
     private val generationLock = Mutex()
     private val subscribers = ConcurrentHashMap<String, CopyOnWriteArraySet<Channel<StreamEventRecord>>>()
+
 
     suspend fun createConversation(userId: Long, title: String?): CreateConversationResponse {
         AiRequestValidators.validateTitle(title)
@@ -502,46 +520,147 @@ class AiChatService(
                     StreamMetaEvent(
                         generationId = generationId,
                         conversationId = context.conversationId,
-                        model = config.model,
+                        model = config.resolveModel(LlmModelTier.FLASH),
                         createdAt = utcNow().toIsoInstant()
                     )
                 )
             )
 
-            deepSeekClient.streamChat(
-                messages = context.messages,
-                temperature = context.temperature,
-                maxTokens = context.maxTokens
-            ) { chunk ->
-                chunk.contentDelta?.takeIf { it.isNotEmpty() }?.let { delta ->
-                    rawAssistant.append(delta)
-                    val visible = deltaFilter.accept(delta)
-                    if (visible.isNotEmpty()) {
-                        pendingDelta.append(visible)
-                        flushDelta()
+            val safety = SafetyScanner.scan(context.currentUserMessage)
+            val answerText: String
+            val options: List<AssistantOptionDto>
+            val source: String
+            if (safety.highRisk) {
+                answerText = SafetyScanner.CRISIS_MESSAGE
+                options = listOf(
+                    AssistantOptionDto("safety_hotline", "🆘 查看紧急资源"),
+                    AssistantOptionDto("contact_doctor", "👩‍⚕️ 联系我的医生"),
+                    AssistantOptionDto("continue_listen", "💬 想继续说说")
+                )
+                source = "safety"
+                finishReason = "safety_stop"
+                emitEvent(
+                    eventType = EVENT_UI_ACTION,
+                    eventJson = json.encodeToString(
+                        StreamUiActionEvent(
+                            type = "OPEN_SAFETY",
+                            title = "安全支持",
+                            payload = mapOf("reasons" to safety.reasons.joinToString(","))
+                        )
+                    )
+                )
+                runCatching {
+                    safetyAlertService?.raise(
+                        userId = context.userId,
+                        riskLevel = RiskLevel.HIGH,
+                        reasonCodes = safety.reasons,
+                        evidence = context.currentUserMessage.take(500)
+                    )
+                }
+                runCatching {
+                    uiTaskService?.create(
+                        userId = context.userId,
+                        type = UiTaskType.SAFETY,
+                        title = "安全支持与求助资源",
+                        payload = mapOf("source" to "AI_CHAT"),
+                        source = "SAFETY"
+                    )
+                }
+                pendingDelta.append(answerText)
+                flushDelta(force = true)
+            } else if (agentOrchestrator != null) {
+                val outcome = agentOrchestrator.run(
+                    seedMessages = context.messages,
+                    userId = context.userId,
+                    conversationId = context.conversationId,
+                    temperature = context.temperature,
+                    maxTokens = context.maxTokens,
+                    modelTier = LlmModelTier.FLASH,
+                    onToolCall = { call ->
+                        emitEvent(
+                            eventType = EVENT_TOOL_CALL,
+                            eventJson = json.encodeToString(
+                                StreamToolCallEvent(
+                                    id = call.id,
+                                    name = call.name,
+                                    argumentsJson = call.argumentsJson
+                                )
+                            )
+                        )
+                    },
+                    onToolResult = { trace ->
+                        emitEvent(
+                            eventType = EVENT_TOOL_RESULT,
+                            eventJson = json.encodeToString(
+                                StreamToolResultEvent(
+                                    id = trace.id,
+                                    name = trace.name,
+                                    ok = trace.ok,
+                                    summary = trace.summary
+                                )
+                            )
+                        )
+                    }
+                )
+                usage = outcome.usage
+                for (action in outcome.uiActions) {
+                    emitEvent(
+                        eventType = EVENT_UI_ACTION,
+                        eventJson = json.encodeToString(action)
+                    )
+                }
+                val rawAnswer = outcome.assistantText
+                val extracted = optionResolver.extractAnswerAndPrimaryOptions(rawAnswer)
+                answerText = extracted.first.ifBlank { rawAnswer.trim() }
+                val resolved = optionResolver.resolveOptions(
+                    userMessage = context.currentUserMessage,
+                    assistantAnswer = answerText,
+                    primary = extracted.second
+                )
+                options = resolved.first
+                source = resolved.second
+                finishReason = "stop"
+                // pseudo-stream final answer for existing clients
+                pendingDelta.append(answerText)
+                flushDelta(force = true)
+            } else {
+                deepSeekClient.streamChat(
+                    messages = context.messages,
+                    temperature = context.temperature,
+                    maxTokens = context.maxTokens,
+                    modelTier = LlmModelTier.FLASH
+                ) { chunk ->
+                    chunk.contentDelta?.takeIf { it.isNotEmpty() }?.let { delta ->
+                        rawAssistant.append(delta)
+                        val visible = deltaFilter.accept(delta)
+                        if (visible.isNotEmpty()) {
+                            pendingDelta.append(visible)
+                            flushDelta()
+                        }
+                    }
+                    if (!chunk.finishReason.isNullOrBlank()) {
+                        finishReason = chunk.finishReason
+                    }
+                    if (chunk.usage != null) {
+                        usage = chunk.usage
                     }
                 }
-                if (!chunk.finishReason.isNullOrBlank()) {
-                    finishReason = chunk.finishReason
+                val visibleTail = deltaFilter.flushRemainder()
+                if (visibleTail.isNotEmpty()) {
+                    pendingDelta.append(visibleTail)
                 }
-                if (chunk.usage != null) {
-                    usage = chunk.usage
-                }
+                flushDelta(force = true)
+                val rawAnswer = rawAssistant.toString()
+                val extracted = optionResolver.extractAnswerAndPrimaryOptions(rawAnswer)
+                answerText = extracted.first.ifBlank { rawAnswer.trim() }
+                val resolved = optionResolver.resolveOptions(
+                    userMessage = context.currentUserMessage,
+                    assistantAnswer = answerText,
+                    primary = extracted.second
+                )
+                options = resolved.first
+                source = resolved.second
             }
-            val visibleTail = deltaFilter.flushRemainder()
-            if (visibleTail.isNotEmpty()) {
-                pendingDelta.append(visibleTail)
-            }
-            flushDelta(force = true)
-
-            val rawAnswer = rawAssistant.toString()
-            val (answerCandidate, primaryOptions) = optionResolver.extractAnswerAndPrimaryOptions(rawAnswer)
-            val answerText = answerCandidate.ifBlank { rawAnswer.trim() }
-            val (options, source) = optionResolver.resolveOptions(
-                userMessage = context.currentUserMessage,
-                assistantAnswer = answerText,
-                primary = primaryOptions
-            )
 
             usage?.let {
                 emitEvent(
@@ -573,6 +692,18 @@ class AiChatService(
                 completionTokens = usage?.completionTokens
             )
 
+            scope.launch {
+                runCatching {
+                    nlpService?.analyzeAndStore(
+                        userId = context.userId,
+                        conversationId = context.conversationId,
+                        messageId = null,
+                        text = context.currentUserMessage
+                    )
+                }
+                runCatching { maybeRefreshSummary(context.conversationId) }
+            }
+
             emitEvent(
                 eventType = EVENT_DONE,
                 eventJson = json.encodeToString(
@@ -584,6 +715,7 @@ class AiChatService(
                 )
             )
             markGenerationFinished(generationId, AiGenerationStatus.COMPLETED, null, null)
+
         } catch (e: CancellationException) {
             markGenerationFinished(
                 generationId = generationId,
@@ -639,6 +771,7 @@ class AiChatService(
             }.orderBy(AiMessagesTable.id, SortOrder.DESC).limit(config.contextRecentMessages).toList().asReversed()
 
             val summaryToUse = conversation[AiConversationsTable.summary]
+            val userId = generation[AiGenerationsTable.userId].value
 
             val messages = mutableListOf<ChatMessage>()
             messages += ChatMessage(role = "system", content = AI_SYSTEM_PROMPT)
@@ -654,14 +787,66 @@ class AiChatService(
             }
 
             GenerationContext(
+                userId = userId,
                 conversationId = conversationRef.value,
                 currentUserMessage = requestPayload.userMessage.trim(),
                 temperature = requestPayload.temperature,
                 maxTokens = requestPayload.maxTokens,
-                messages = messages
+                messages = messages,
+                summary = summaryToUse
             )
+        }.let { base ->
+            val contextBlock = contextAssembler?.assemble(base.userId, base.summary)
+            if (contextBlock.isNullOrBlank()) {
+                base
+            } else {
+                val enriched = base.messages.toMutableList()
+                // Insert patient context after primary system prompt.
+                enriched.add(1, ChatMessage(role = "system", content = contextBlock))
+                base.copy(messages = enriched)
+            }
         }
     }
+
+    private suspend fun maybeRefreshSummary(conversationId: Long) {
+        val threshold = config.summaryTriggerMessages.coerceAtLeast(8)
+        DatabaseFactory.dbQuery {
+            val conversationRef = EntityID(conversationId, AiConversationsTable)
+            val count = AiMessagesTable.selectAll().where {
+                AiMessagesTable.conversationId eq conversationRef
+            }.count()
+            if (count < threshold) return@dbQuery null
+            val recent = AiMessagesTable.selectAll().where {
+                AiMessagesTable.conversationId eq conversationRef
+            }.orderBy(AiMessagesTable.id, SortOrder.DESC).limit(20).toList().asReversed()
+            recent to conversationRef
+        }?.let { (recent, conversationRef) ->
+            val transcript = recent.joinToString("\n") {
+                "${it[AiMessagesTable.role]}: ${it[AiMessagesTable.content]}"
+            }.take(6000)
+            val (summary, _) = deepSeekClient.completeTextChat(
+                messages = listOf(
+                    ChatMessage(
+                        role = "system",
+                        content = "用中文写不超过120字的对话摘要，保留情绪主题、睡眠/用药线索与未解决问题。"
+                    ),
+                    ChatMessage(role = "user", content = transcript)
+                ),
+                temperature = 0.2,
+                maxTokens = 200,
+                modelTier = LlmModelTier.FLASH
+            )
+            if (summary.isNotBlank()) {
+                DatabaseFactory.dbQuery {
+                    AiConversationsTable.update({ AiConversationsTable.id eq conversationRef }) {
+                        it[AiConversationsTable.summary] = summary.trim().take(1000)
+                        it[updatedAt] = utcNow()
+                    }
+                }
+            }
+        }
+    }
+
 
     private suspend fun persistAssistantMessage(
         generationId: String,

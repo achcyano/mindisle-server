@@ -554,3 +554,220 @@ object UserScaleResultsTable : LongIdTable("user_scale_results") {
     val resultText = text("result_text").nullable()
     val computedAt = datetime("computed_at")
 }
+
+enum class EmaSlot {
+    MORNING,
+    EVENING,
+    ADHOC
+}
+
+enum class EmaActivityLevel {
+    LOW,
+    MID,
+    HIGH
+}
+
+enum class DoseLogStatus {
+    TAKEN,
+    SKIPPED,
+    MISSED
+}
+
+enum class SeverityLevel {
+    NONE,
+    MILD,
+    MODERATE,
+    SEVERE
+}
+
+enum class RiskLevel {
+    LOW,
+    MEDIUM,
+    HIGH
+}
+
+enum class UiTaskType {
+    EMA,
+    SCALE,
+    INTERVENTION,
+    SIDE_EFFECT,
+    SAFETY
+}
+
+enum class UiTaskStatus {
+    PENDING,
+    DONE,
+    DISMISSED,
+    EXPIRED
+}
+
+enum class InterventionDeliveryStatus {
+    PENDING,
+    SHOWN,
+    STARTED,
+    COMPLETED,
+    DISMISSED
+}
+
+enum class SafetyAlertStatus {
+    OPEN,
+    ACKED,
+    RESOLVED
+}
+
+object EmaEntriesTable : LongIdTable("ema_entries") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val localDate = date("local_date")
+    val slot = enumerationByName("slot", 16, EmaSlot::class)
+    val mood = integer("mood")
+    val sleepQuality = integer("sleep_quality").nullable()
+    val activity = enumerationByName("activity", 8, EmaActivityLevel::class).nullable()
+    val socialContact = integer("social_contact").nullable()
+    val stressText = text("stress_text").nullable()
+    val eventTagsJson = text("event_tags_json").nullable()
+    val bodyTagsJson = text("body_tags_json").nullable()
+    val note = text("note").nullable()
+    val responseLatencyMs = long("response_latency_ms").nullable()
+    val submittedAt = datetime("submitted_at")
+
+    init {
+        uniqueIndex(userId, localDate, slot)
+        index(false, userId, localDate)
+    }
+}
+
+object MedicationDoseLogsTable : LongIdTable("medication_dose_logs") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val medicationId = reference("medication_id", UserMedicationsTable, onDelete = ReferenceOption.CASCADE)
+    val localDate = date("local_date")
+    val plannedTime = varchar("planned_time", 8)
+    val status = enumerationByName("status", 16, DoseLogStatus::class)
+    val actedAt = datetime("acted_at")
+    val note = varchar("note", 255).nullable()
+
+    init {
+        uniqueIndex(userId, medicationId, localDate, plannedTime)
+        index(false, userId, localDate)
+    }
+}
+
+object PatientStateSnapshotsTable : LongIdTable("patient_state_snapshots") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val lowMood = enumerationByName("low_mood", 16, SeverityLevel::class)
+    val anxiety = enumerationByName("anxiety", 16, SeverityLevel::class)
+    val rumination = enumerationByName("rumination", 16, SeverityLevel::class)
+    val sleepDisturbance = enumerationByName("sleep_disturbance", 16, SeverityLevel::class)
+    val reducedActivity = enumerationByName("reduced_activity", 16, SeverityLevel::class)
+    val socialWithdrawal = enumerationByName("social_withdrawal", 16, SeverityLevel::class)
+    val medicationDistress = enumerationByName("medication_distress", 16, SeverityLevel::class)
+    val riskLevel = enumerationByName("risk_level", 16, RiskLevel::class)
+    val featureJson = text("feature_json").nullable()
+    val snapshotSource = varchar("snapshot_source", 64).default("RULE_ENGINE")
+    val createdAt = datetime("created_at")
+
+    init {
+        index(false, userId, createdAt)
+    }
+}
+
+object AiNlpFeaturesTable : LongIdTable("ai_nlp_features") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val conversationId = long("conversation_id").nullable()
+    val messageId = long("message_id").nullable()
+    val polarity = double("polarity").nullable()
+    val negativeIntensity = double("negative_intensity").nullable()
+    val anxietyIntensity = double("anxiety_intensity").nullable()
+    val ruminationHit = bool("rumination_hit").default(false)
+    val hopelessHit = bool("hopeless_hit").default(false)
+    val anhedoniaHit = bool("anhedonia_hit").default(false)
+    val riskHit = bool("risk_hit").default(false)
+    val topicsJson = text("topics_json").nullable()
+    val rawJson = text("raw_json").nullable()
+    val createdAt = datetime("created_at")
+
+    init {
+        index(false, userId, createdAt)
+        index(false, conversationId, createdAt)
+    }
+}
+
+object InterventionModulesTable : LongIdTable("intervention_modules") {
+    val code = varchar("code", 64).uniqueIndex()
+    val title = varchar("title", 200)
+    val category = varchar("category", 64)
+    val summary = text("summary").nullable()
+    val durationMinutes = integer("duration_minutes").default(5)
+    val contentJson = text("content_json")
+    val active = bool("active").default(true)
+    val createdAt = datetime("created_at")
+}
+
+object InterventionDeliveriesTable : LongIdTable("intervention_deliveries") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val moduleCode = varchar("module_code", 64)
+    val triggerType = varchar("trigger_type", 32)
+    val stateDimsJson = text("state_dims_json").nullable()
+    val status = enumerationByName("status", 16, InterventionDeliveryStatus::class)
+    val conversationId = long("conversation_id").nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        index(false, userId, status, createdAt)
+        index(false, userId, moduleCode, createdAt)
+    }
+}
+
+object InterventionFeedbackTable : LongIdTable("intervention_feedback") {
+    val deliveryId = reference("delivery_id", InterventionDeliveriesTable, onDelete = ReferenceOption.CASCADE).uniqueIndex()
+    val adopted = bool("adopted").default(false)
+    val completed = bool("completed").default(false)
+    val durationSec = integer("duration_sec").nullable()
+    val moodBefore = integer("mood_before").nullable()
+    val moodAfter = integer("mood_after").nullable()
+    val createdAt = datetime("created_at")
+}
+
+object UiTasksTable : LongIdTable("ui_tasks") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val taskType = enumerationByName("task_type", 24, UiTaskType::class)
+    val title = varchar("title", 200)
+    val status = enumerationByName("status", 16, UiTaskStatus::class).default(UiTaskStatus.PENDING)
+    val payloadJson = text("payload_json").nullable()
+    val taskSource = varchar("task_source", 64).default("SYSTEM")
+    val dueAt = datetime("due_at").nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        index(false, userId, status, createdAt)
+    }
+}
+
+object SafetyAlertsTable : LongIdTable("safety_alerts") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val doctorId = long("doctor_id").nullable()
+    val riskLevel = enumerationByName("risk_level", 16, RiskLevel::class)
+    val reasonCodesJson = text("reason_codes_json")
+    val evidenceJson = text("evidence_json").nullable()
+    val status = enumerationByName("status", 16, SafetyAlertStatus::class).default(SafetyAlertStatus.OPEN)
+    val ackNote = text("ack_note").nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        index(false, userId, status, createdAt)
+        index(false, doctorId, status, createdAt)
+    }
+}
+
+object AppUsageEventsTable : LongIdTable("app_usage_events") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val eventType = varchar("event_type", 64)
+    val payloadJson = text("payload_json").nullable()
+    val createdAt = datetime("created_at")
+
+    init {
+        index(false, userId, createdAt)
+    }
+}
