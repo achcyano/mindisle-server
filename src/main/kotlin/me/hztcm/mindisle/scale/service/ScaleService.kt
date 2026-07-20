@@ -149,10 +149,14 @@ private data class ScaleDelivery(
 class ScaleService(
     private val config: LlmConfig,
     private val deepSeekClient: DeepSeekAliyunClient,
-    private val scaleConfig: ScaleConfig
+    private val scaleConfig: ScaleConfig,
+    private val stateService: me.hztcm.mindisle.state.service.PatientStateService? = null,
+    private val safetyAlertService: me.hztcm.mindisle.safety.service.SafetyAlertService? = null,
+    private val uiTaskService: me.hztcm.mindisle.task.service.UiTaskService? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private val assistContextHistory = ConcurrentHashMap<ScaleAssistHistoryKey, ConcurrentLinkedDeque<ScaleAssistRound>>()
+    private val log = org.slf4j.LoggerFactory.getLogger(ScaleService::class.java)
 
     suspend fun listScales(userId: Long, limit: Int, cursor: String?, status: ScaleStatus?): ListScalesResponse {
         val safeLimit = limit.coerceIn(1, 50)
@@ -462,7 +466,12 @@ class ScaleService(
     }
 
     suspend fun submitSession(userId: Long, sessionId: Long): SubmitScaleSessionResponse {
-        return DatabaseFactory.dbQuery {
+        data class SubmitOutcome(
+            val response: SubmitScaleSessionResponse,
+            val resultFlags: List<String>,
+            val resultText: String?
+        )
+        val outcome = DatabaseFactory.dbQuery {
             val sessionRow = getOwnedSession(userId, sessionId)
             ensureSessionSubmittable(sessionRow[UserScaleSessionsTable.status])
             val versionRef = sessionRow[UserScaleSessionsTable.versionId]
@@ -581,13 +590,46 @@ class ScaleService(
                 it[updatedAt] = now
             }
 
-            SubmitScaleSessionResponse(
-                sessionId = sessionId,
-                status = ScaleSessionStatusDto.SUBMITTED,
-                progress = 100,
-                submittedAt = now.toIsoInstant()
+            SubmitOutcome(
+                response = SubmitScaleSessionResponse(
+                    sessionId = sessionId,
+                    status = ScaleSessionStatusDto.SUBMITTED,
+                    progress = 100,
+                    submittedAt = now.toIsoInstant()
+                ),
+                resultFlags = scoreResult.resultFlags,
+                resultText = scoreResult.resultText
             )
         }
+        try {
+            stateService?.recompute(userId, source = "SCALE_SUBMIT")
+        } catch (ex: Exception) {
+            log.error("State recompute failed after scale submit userId={} sessionId={}", userId, sessionId, ex)
+        }
+        if (outcome.resultFlags.any { it.equals("SUICIDE_RISK", ignoreCase = true) }) {
+            try {
+                safetyAlertService?.raise(
+                    userId = userId,
+                    riskLevel = me.hztcm.mindisle.db.RiskLevel.HIGH,
+                    reasonCodes = listOf("PHQ9_SUICIDE_ITEM"),
+                    evidence = outcome.resultText?.take(500)
+                )
+                uiTaskService?.create(
+                    userId = userId,
+                    type = me.hztcm.mindisle.db.UiTaskType.SAFETY,
+                    title = "安全支持与求助资源",
+                    payload = mapOf("source" to "SCALE_SUBMIT", "sessionId" to sessionId.toString()),
+                    source = "SCALE_SUICIDE_FLAG"
+                )
+                uiTaskService?.dismissPendingByTypes(
+                    userId = userId,
+                    types = setOf(me.hztcm.mindisle.db.UiTaskType.INTERVENTION)
+                )
+            } catch (ex: Exception) {
+                log.error("Safety escalate failed after scale submit userId={} sessionId={}", userId, sessionId, ex)
+            }
+        }
+        return outcome.response
     }
 
     suspend fun getResult(userId: Long, sessionId: Long): ScaleResultResponse {

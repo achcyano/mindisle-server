@@ -66,6 +66,26 @@ class UiTaskService {
         }
     }
 
+    suspend fun dismissPendingByTypes(userId: Long, types: Set<UiTaskType>): Int {
+        if (types.isEmpty()) return 0
+        val now = utcNow()
+        return DatabaseFactory.dbQuery {
+            val userRef = EntityID(userId, UsersTable)
+            var updated = 0
+            types.forEach { type ->
+                updated += UiTasksTable.update({
+                    (UiTasksTable.userId eq userRef) and
+                        (UiTasksTable.status eq UiTaskStatus.PENDING) and
+                        (UiTasksTable.taskType eq type)
+                }) {
+                    it[status] = UiTaskStatus.DISMISSED
+                    it[updatedAt] = now
+                }
+            }
+            updated
+        }
+    }
+
     private fun org.jetbrains.exposed.sql.ResultRow.toItem(): UiTaskItem {
         val payload = runCatching {
             json.decodeFromString<Map<String, String>>(this[UiTasksTable.payloadJson] ?: "{}")

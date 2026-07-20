@@ -23,6 +23,8 @@ import me.hztcm.mindisle.state.service.PatientStateService
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.lessEq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -99,9 +101,14 @@ class EmaService(
             }
             EmaEntriesTable.selectAll().where { EmaEntriesTable.id eq id }.first().toResponse()
         }
-        runCatching {
+        try {
             val state = stateService.recompute(userId, source = "EMA_SUBMIT")
-            interventionService?.matchFromState(userId, state, triggerType = "EMA_SUBMIT")
+            if (state.riskLevel != "HIGH") {
+                interventionService?.matchFromState(userId, state, triggerType = "EMA_SUBMIT")
+            }
+        } catch (ex: Exception) {
+            org.slf4j.LoggerFactory.getLogger(EmaService::class.java)
+                .error("Post-EMA state/intervention failed userId={}", userId, ex)
         }
         return entry
     }
@@ -112,17 +119,16 @@ class EmaService(
         val toDate = to?.let { parseLocalDateOrTodayPlus8(it) }
         return DatabaseFactory.dbQuery {
             val userRef = EntityID(userId, UsersTable)
-            var rows = EmaEntriesTable.selectAll().where { EmaEntriesTable.userId eq userRef }
+            val condition = buildList {
+                add(EmaEntriesTable.userId eq userRef)
+                if (fromDate != null) add(EmaEntriesTable.localDate greaterEq fromDate)
+                if (toDate != null) add(EmaEntriesTable.localDate lessEq toDate)
+            }.reduce { acc, op -> acc and op }
+            val rows = EmaEntriesTable.selectAll().where { condition }
                 .orderBy(EmaEntriesTable.localDate, SortOrder.DESC)
                 .orderBy(EmaEntriesTable.submittedAt, SortOrder.DESC)
                 .limit(safeLimit)
                 .toList()
-            if (fromDate != null) {
-                rows = rows.filter { it[EmaEntriesTable.localDate] >= fromDate }
-            }
-            if (toDate != null) {
-                rows = rows.filter { it[EmaEntriesTable.localDate] <= toDate }
-            }
             val today = utcNow().toLocalDatePlus8()
             val todaySlots = EmaEntriesTable.selectAll().where {
                 (EmaEntriesTable.userId eq userRef) and (EmaEntriesTable.localDate eq today)

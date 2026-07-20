@@ -29,7 +29,8 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
 
 internal class DoctorBindingDomainService(
-    private val bindingCodeService: DoctorBindingCodeDomainService
+    private val bindingCodeService: DoctorBindingCodeDomainService,
+    private val safetyAlertService: me.hztcm.mindisle.safety.service.SafetyAlertService? = null
 ) {
     suspend fun getPatientBindingStatus(userId: Long): PatientDoctorBindingStatusResponse {
         return DatabaseFactory.dbQuery {
@@ -55,7 +56,7 @@ internal class DoctorBindingDomainService(
 
     suspend fun bindPatientToDoctor(userId: Long, request: PatientBindDoctorRequest): PatientDoctorBindingStatusResponse {
         val code = normalizeAndValidateDoctorBindingCode(request.bindingCode)
-        return DatabaseFactory.dbQuery {
+        val result = DatabaseFactory.dbQuery {
             val now = utcNow()
             val userRef = EntityID(userId, UsersTable)
             requireUser(userRef)
@@ -73,17 +74,22 @@ internal class DoctorBindingDomainService(
                 }
                 bindingCodeService.consumeCodeRowOrThrow(this, codeRow[DoctorBindingCodesTable.id], now)
                 val doctor = requireDoctor(active[DoctorPatientBindingsTable.doctorId])
-                return@dbQuery PatientDoctorBindingStatusResponse(
-                    isBound = true,
-                    current = toBindingInfo(active, doctor),
-                    updatedAt = active[DoctorPatientBindingsTable.updatedAt].toIsoInstant()
+                return@dbQuery Triple(
+                    PatientDoctorBindingStatusResponse(
+                        isBound = true,
+                        current = toBindingInfo(active, doctor),
+                        updatedAt = active[DoctorPatientBindingsTable.updatedAt].toIsoInstant()
+                    ),
+                    activeDoctorId,
+                    false
                 )
             }
 
             bindingCodeService.consumeCodeRowOrThrow(this, codeRow[DoctorBindingCodesTable.id], now)
+            val doctorId = codeRow[DoctorBindingCodesTable.doctorId].value
             val bindingId = DoctorPatientBindingsTable.insert {
                 it[patientUserId] = userRef
-                it[doctorId] = codeRow[DoctorBindingCodesTable.doctorId]
+                it[DoctorPatientBindingsTable.doctorId] = codeRow[DoctorBindingCodesTable.doctorId]
                 it[status] = DoctorPatientBindingStatus.ACTIVE
                 it[severityGroup] = null
                 it[diagnosis] = null
@@ -97,12 +103,21 @@ internal class DoctorBindingDomainService(
                 DoctorPatientBindingsTable.id eq bindingId
             }.first()
             val doctor = requireDoctor(binding[DoctorPatientBindingsTable.doctorId])
-            PatientDoctorBindingStatusResponse(
-                isBound = true,
-                current = toBindingInfo(binding, doctor),
-                updatedAt = now.toIsoInstant()
+            Triple(
+                PatientDoctorBindingStatusResponse(
+                    isBound = true,
+                    current = toBindingInfo(binding, doctor),
+                    updatedAt = now.toIsoInstant()
+                ),
+                doctorId,
+                true
             )
         }
+        // Backfill orphan alerts whether rebinding same doctor or newly bound.
+        runCatching {
+            safetyAlertService?.assignOrphanAlerts(userId, result.second)
+        }
+        return result.first
     }
 
     suspend fun unbindPatientDoctor(userId: Long): PatientDoctorBindingStatusResponse {

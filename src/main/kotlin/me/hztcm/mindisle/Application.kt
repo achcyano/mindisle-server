@@ -62,9 +62,9 @@ fun Application.module() {
     val deepSeekClient = DeepSeekAliyunClient(AppConfig.llm)
 
     val safetyAlertService = SafetyAlertService()
-    val stateService = PatientStateService(safetyAlertService)
-    val doseLogService = DoseLogService(stateService)
     val uiTaskService = UiTaskService()
+    val stateService = PatientStateService(safetyAlertService, uiTaskService)
+    val doseLogService = DoseLogService(stateService)
     val interventionService = InterventionService(uiTaskService)
     val emaService = EmaService(stateService, interventionService)
     val contextAssembler = PatientContextAssembler(stateService, doseLogService)
@@ -85,9 +85,24 @@ fun Application.module() {
         safetyAlertService = safetyAlertService,
         uiTaskService = uiTaskService
     )
-    val scaleService = ScaleService(AppConfig.llm, deepSeekClient, AppConfig.scale)
-    val medicationService = MedicationService()
-    val doctorService = DoctorService(AppConfig.auth, AppConfig.llm, jwtService, smsGateway, deepSeekClient)
+    val scaleService = ScaleService(
+        AppConfig.llm,
+        deepSeekClient,
+        AppConfig.scale,
+        stateService = stateService,
+        safetyAlertService = safetyAlertService,
+        uiTaskService = uiTaskService
+    )
+    val medicationService = MedicationService(stateService)
+    val doctorService = DoctorService(
+        AppConfig.auth,
+        AppConfig.llm,
+        jwtService,
+        smsGateway,
+        deepSeekClient,
+        safetyAlertService = safetyAlertService,
+        stateService = stateService
+    )
     val eventService = EventService()
 
     configureStatusPages()

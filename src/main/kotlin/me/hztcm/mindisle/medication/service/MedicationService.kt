@@ -27,11 +27,13 @@ import org.jetbrains.exposed.sql.update
 import java.time.LocalDate
 import java.time.ZoneOffset
 
-class MedicationService {
+class MedicationService(
+    private val stateService: me.hztcm.mindisle.state.service.PatientStateService? = null
+) {
     private val json = Json
 
     suspend fun createMedication(userId: Long, request: CreateMedicationRequest): MedicationItemResponse {
-        return DatabaseFactory.dbQuery {
+        val response = DatabaseFactory.dbQuery {
             val nowUtc = utcNow()
             val todayPlus8 = nowUtc.toLocalDatePlus8()
             val validated = MedicationValidators.validateCreateRequest(request, todayPlus8)
@@ -58,6 +60,8 @@ class MedicationService {
             }.firstOrNull() ?: throw IllegalStateException("Failed to load inserted medication")
             row.toResponse(todayPlus8)
         }
+        runCatching { stateService?.recompute(userId, source = "MED_CREATE") }
+        return response
     }
 
     suspend fun listMedications(
@@ -95,7 +99,7 @@ class MedicationService {
         medicationId: Long,
         request: UpdateMedicationRequest
     ): MedicationItemResponse {
-        return DatabaseFactory.dbQuery {
+        val response = DatabaseFactory.dbQuery {
             val nowUtc = utcNow()
             val todayPlus8 = nowUtc.toLocalDatePlus8()
             val userEntityId = EntityID(userId, UsersTable)
@@ -123,6 +127,8 @@ class MedicationService {
             }.firstOrNull() ?: throw IllegalStateException("Failed to load updated medication")
             updated.toResponse(todayPlus8)
         }
+        runCatching { stateService?.recompute(userId, source = "MED_UPDATE") }
+        return response
     }
 
     suspend fun deleteMedication(userId: Long, medicationId: Long) {
@@ -141,6 +147,7 @@ class MedicationService {
                 it[updatedAt] = nowUtc
             }
         }
+        runCatching { stateService?.recompute(userId, source = "MED_DELETE") }
     }
 
     private fun buildListCondition(

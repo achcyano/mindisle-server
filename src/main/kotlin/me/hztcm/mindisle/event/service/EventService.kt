@@ -170,12 +170,15 @@ class EventService {
             .withOffsetSameInstant(java.time.ZoneOffset.ofHours(8))
             .hour
         val pending = mutableListOf<String>()
-        if (hourPlus8 < 15 && "MORNING" !in completedSlots && "ADHOC" !in completedSlots) {
+        // Morning remains due all day until completed (missed morning is still actionable).
+        if ("MORNING" !in completedSlots) {
             pending += "MORNING"
         }
-        if (hourPlus8 >= 15 && "EVENING" !in completedSlots && "ADHOC" !in completedSlots) {
+        // Evening window opens at 15:00 +8.
+        if (hourPlus8 >= 15 && "EVENING" !in completedSlots) {
             pending += "EVENING"
         }
+        // ADHOC does not suppress planned slots; only used when no planned pending and nothing done.
         if (pending.isEmpty() && completedSlots.isEmpty()) {
             pending += "ADHOC"
         }

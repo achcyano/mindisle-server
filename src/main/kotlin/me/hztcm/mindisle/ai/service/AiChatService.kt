@@ -549,15 +549,13 @@ class AiChatService(
                         )
                     )
                 )
-                runCatching {
+                try {
                     safetyAlertService?.raise(
                         userId = context.userId,
                         riskLevel = RiskLevel.HIGH,
                         reasonCodes = safety.reasons,
                         evidence = context.currentUserMessage.take(500)
                     )
-                }
-                runCatching {
                     uiTaskService?.create(
                         userId = context.userId,
                         type = UiTaskType.SAFETY,
@@ -565,6 +563,13 @@ class AiChatService(
                         payload = mapOf("source" to "AI_CHAT"),
                         source = "SAFETY"
                     )
+                    uiTaskService?.dismissPendingByTypes(
+                        userId = context.userId,
+                        types = setOf(UiTaskType.INTERVENTION)
+                    )
+                } catch (ex: Exception) {
+                    org.slf4j.LoggerFactory.getLogger(AiChatService::class.java)
+                        .error("Safety escalate failed in chat userId={}", context.userId, ex)
                 }
                 pendingDelta.append(answerText)
                 flushDelta(force = true)
@@ -697,7 +702,7 @@ class AiChatService(
                     nlpService?.analyzeAndStore(
                         userId = context.userId,
                         conversationId = context.conversationId,
-                        messageId = null,
+                        messageId = context.userMessageId,
                         text = context.currentUserMessage
                     )
                 }
@@ -772,6 +777,11 @@ class AiChatService(
 
             val summaryToUse = conversation[AiConversationsTable.summary]
             val userId = generation[AiGenerationsTable.userId].value
+            val userMessageId = AiMessagesTable.selectAll().where {
+                (AiMessagesTable.generationId eq generationId) and
+                    (AiMessagesTable.role eq AiMessageRole.USER)
+            }.orderBy(AiMessagesTable.id, SortOrder.DESC).limit(1)
+                .firstOrNull()?.get(AiMessagesTable.id)?.value
 
             val messages = mutableListOf<ChatMessage>()
             messages += ChatMessage(role = "system", content = AI_SYSTEM_PROMPT)
@@ -790,6 +800,7 @@ class AiChatService(
                 userId = userId,
                 conversationId = conversationRef.value,
                 currentUserMessage = requestPayload.userMessage.trim(),
+                userMessageId = userMessageId,
                 temperature = requestPayload.temperature,
                 maxTokens = requestPayload.maxTokens,
                 messages = messages,

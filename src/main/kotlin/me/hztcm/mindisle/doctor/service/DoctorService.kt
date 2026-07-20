@@ -55,7 +55,9 @@ class DoctorService(
     llmConfig: LlmConfig,
     jwtService: JwtService,
     smsGateway: SmsGateway?,
-    deepSeekClient: DeepSeekAliyunClient
+    deepSeekClient: DeepSeekAliyunClient,
+    safetyAlertService: me.hztcm.mindisle.safety.service.SafetyAlertService? = null,
+    stateService: me.hztcm.mindisle.state.service.PatientStateService? = null
 ) {
     private val deps = DoctorServiceDeps(
         authConfig = authConfig,
@@ -67,10 +69,10 @@ class DoctorService(
 
     private val authService = DoctorAuthDomainService(deps)
     private val bindingCodeService = DoctorBindingCodeDomainService()
-    private val bindingService = DoctorBindingDomainService(bindingCodeService)
+    private val bindingService = DoctorBindingDomainService(bindingCodeService, safetyAlertService)
     private val patientService = DoctorPatientDomainService(deps)
     private val exportService = DoctorExportDomainService(deps)
-    private val monitoringService = DoctorMonitoringDomainService(deps)
+    private val monitoringService = DoctorMonitoringDomainService(deps, stateService)
 
     suspend fun sendSmsCode(request: SendDoctorSmsCodeRequest, requestIp: String?) =
         authService.sendSmsCode(request, requestIp)

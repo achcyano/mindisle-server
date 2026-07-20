@@ -22,8 +22,10 @@ import me.hztcm.mindisle.db.UserScaleSessionsTable
 import me.hztcm.mindisle.db.UserSideEffectsTable
 import me.hztcm.mindisle.db.UserWeightLogsTable
 import me.hztcm.mindisle.db.UsersTable
+import me.hztcm.mindisle.db.UiTaskType
 import me.hztcm.mindisle.model.PatientStateResponse
 import me.hztcm.mindisle.safety.service.SafetyAlertService
+import me.hztcm.mindisle.task.service.UiTaskService
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
@@ -31,23 +33,32 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
+import org.slf4j.LoggerFactory
 
 class PatientStateService(
-    private val safetyAlertService: SafetyAlertService? = null
+    private val safetyAlertService: SafetyAlertService? = null,
+    private val uiTaskService: UiTaskService? = null
 ) {
     private val json = Json { encodeDefaults = true }
+    private val log = LoggerFactory.getLogger(PatientStateService::class.java)
 
-    suspend fun current(userId: Long): PatientStateResponse {
+    suspend fun current(userId: Long, maxAgeHours: Long = 6): PatientStateResponse {
         val latest = DatabaseFactory.dbQuery {
             PatientStateSnapshotsTable.selectAll().where {
                 PatientStateSnapshotsTable.userId eq EntityID(userId, UsersTable)
             }.orderBy(PatientStateSnapshotsTable.createdAt, SortOrder.DESC).limit(1).firstOrNull()
         }
-        return if (latest != null) {
-            latest.toResponse()
-        } else {
-            recompute(userId, source = "LAZY")
+        if (latest == null) {
+            return recompute(userId, source = "LAZY")
         }
+        val ageHours = java.time.Duration.between(
+            latest[PatientStateSnapshotsTable.createdAt],
+            utcNow()
+        ).toHours()
+        if (ageHours > maxAgeHours) {
+            return recompute(userId, source = "STALE_REFRESH")
+        }
+        return latest.toResponse()
     }
 
     suspend fun recompute(userId: Long, source: String = "RULE_ENGINE"): PatientStateResponse {
@@ -75,22 +86,26 @@ class PatientStateService(
             val riskHits = nlpRows.count { it[AiNlpFeaturesTable.riskHit] }
             val avgPolarity = nlpRows.mapNotNull { it[AiNlpFeaturesTable.polarity] }.takeIf { it.isNotEmpty() }?.average()
 
-            val scaleScores = latestScaleScores(userRef)
-            val phq9 = scaleScores["PHQ9"]
-            val gad7 = scaleScores["GAD7"]
-            val psqi = scaleScores["PSQI"]
+            val scaleMeta = latestScaleMeta(userRef)
+            val phq9 = scaleMeta.scores["PHQ9"]
+            val gad7 = scaleMeta.scores["GAD7"]
+            val psqi = scaleMeta.scores["PSQI"] ?: scaleMeta.scores["ISI"]
+            val suicideFlag = scaleMeta.flags.contains("SUICIDE_RISK")
 
+            val sideEffectFrom = now.minusDays(14)
             val missedDoses = MedicationDoseLogsTable.selectAll().where {
                 (MedicationDoseLogsTable.userId eq userRef) and
                     (MedicationDoseLogsTable.localDate greaterEq fromDate) and
                     (MedicationDoseLogsTable.status eq DoseLogStatus.MISSED)
             }.count().toInt()
             val sideEffects = UserSideEffectsTable.selectAll().where {
-                UserSideEffectsTable.userId eq userRef
-            }.orderBy(UserSideEffectsTable.recordedAt, SortOrder.DESC).limit(10).count().toInt()
+                (UserSideEffectsTable.userId eq userRef) and
+                    (UserSideEffectsTable.recordedAt greaterEq sideEffectFrom)
+            }.count().toInt()
 
             val weights = UserWeightLogsTable.selectAll().where {
-                UserWeightLogsTable.userId eq userRef
+                (UserWeightLogsTable.userId eq userRef) and
+                    (UserWeightLogsTable.recordedAt greaterEq now.minusDays(180))
             }.orderBy(UserWeightLogsTable.recordedAt, SortOrder.ASC).map {
                 it[UserWeightLogsTable.weightKg].toDouble()
             }
@@ -130,9 +145,16 @@ class PatientStateService(
             }
 
             val dims = listOf(lowMood, anxiety, rumination, sleep, activity, social, medDistress)
+            val hasObservation = emaRows.isNotEmpty() || nlpRows.isNotEmpty() || scaleMeta.scores.isNotEmpty() ||
+                sideEffects > 0 || missedDoses > 0 || weights.isNotEmpty()
+            // Crisis HIGH is reserved for self-harm/NLP risk, med safety severe, or severe PHQ-9.
+            // Symptom SEVERE alone (e.g. sleep) maps to MEDIUM so it still drives intervention.
             val risk = when {
-                riskHits > 0 || dims.any { it == SeverityLevel.SEVERE } || (phq9 != null && phq9 >= 15) -> RiskLevel.HIGH
-                dims.any { it == SeverityLevel.MODERATE } || (phq9 != null && phq9 >= 10) -> RiskLevel.MEDIUM
+                suicideFlag || riskHits > 0 || medDistress == SeverityLevel.SEVERE ||
+                    (phq9 != null && phq9 >= 20) -> RiskLevel.HIGH
+                !hasObservation -> RiskLevel.LOW
+                dims.any { it == SeverityLevel.SEVERE || it == SeverityLevel.MODERATE } ||
+                    (phq9 != null && phq9 >= 10) -> RiskLevel.MEDIUM
                 else -> RiskLevel.LOW
             }
 
@@ -143,7 +165,9 @@ class PatientStateService(
                 "psqi" to (psqi?.toString() ?: "n/a"),
                 "missedDoses7d" to missedDoses.toString(),
                 "weightGainPct" to "%.1f".format(weightGainPct),
-                "nlpRiskHits7d" to riskHits.toString()
+                "nlpRiskHits7d" to riskHits.toString(),
+                "suicideFlag" to suicideFlag.toString(),
+                "observed" to hasObservation.toString()
             )
 
             val id = PatientStateSnapshotsTable.insert {
@@ -168,38 +192,68 @@ class PatientStateService(
 
         val response = snapshot.first.toResponse()
         if (snapshot.second == RiskLevel.HIGH) {
-            runCatching {
+            val reasons = buildList {
+                if (response.features["suicideFlag"] == "true") add("PHQ9_SUICIDE_ITEM")
+                if ((response.features["nlpRiskHits7d"]?.toIntOrNull() ?: 0) > 0) add("NLP_RISK")
+                if (response.medicationDistress == SeverityLevel.SEVERE.name) add("MED_SAFETY")
+                if (isEmpty()) add("STATE_HIGH_RISK")
+            }
+            try {
                 safetyAlertService?.raise(
                     userId = userId,
                     riskLevel = RiskLevel.HIGH,
-                    reasonCodes = listOf("STATE_SEVERE_OR_RISK_NLP"),
+                    reasonCodes = reasons,
                     evidence = response.summary
                 )
+                uiTaskService?.create(
+                    userId = userId,
+                    type = UiTaskType.SAFETY,
+                    title = "安全支持与求助资源",
+                    payload = mapOf("source" to source),
+                    source = "STATE_HIGH"
+                )
+                uiTaskService?.dismissPendingByTypes(
+                    userId = userId,
+                    types = setOf(UiTaskType.INTERVENTION)
+                )
+            } catch (ex: Exception) {
+                log.error("Failed to escalate HIGH risk for userId={}", userId, ex)
             }
         }
         return response
     }
 
-    private fun org.jetbrains.exposed.sql.Transaction.latestScaleScores(
+    private data class ScaleMeta(
+        val scores: Map<String, Double>,
+        val flags: Set<String>
+    )
+
+    private fun org.jetbrains.exposed.sql.Transaction.latestScaleMeta(
         userRef: EntityID<Long>
-    ): Map<String, Double> {
+    ): ScaleMeta {
         val sessions = UserScaleSessionsTable.selectAll().where {
             (UserScaleSessionsTable.userId eq userRef) and
                 (UserScaleSessionsTable.status eq ScaleSessionStatus.SUBMITTED)
         }.orderBy(UserScaleSessionsTable.submittedAt, SortOrder.DESC).limit(30).toList()
 
-        val result = linkedMapOf<String, Double>()
+        val scores = linkedMapOf<String, Double>()
+        val flags = linkedSetOf<String>()
         for (session in sessions) {
             val scaleCode = ScalesTable.selectAll().where {
                 ScalesTable.id eq session[UserScaleSessionsTable.scaleId]
             }.firstOrNull()?.get(ScalesTable.code) ?: continue
-            if (result.containsKey(scaleCode)) continue
-            val total = UserScaleResultsTable.selectAll().where {
+            val resultRow = UserScaleResultsTable.selectAll().where {
                 UserScaleResultsTable.sessionId eq session[UserScaleSessionsTable.id]
-            }.firstOrNull()?.get(UserScaleResultsTable.totalScore)?.toDouble() ?: continue
-            result[scaleCode] = total
+            }.firstOrNull() ?: continue
+            if (!scores.containsKey(scaleCode)) {
+                resultRow[UserScaleResultsTable.totalScore]?.toDouble()?.let { scores[scaleCode] = it }
+            }
+            val detail = resultRow[UserScaleResultsTable.resultDetailJson]
+            if (!detail.isNullOrBlank() && detail.contains("SUICIDE_RISK")) {
+                flags += "SUICIDE_RISK"
+            }
         }
-        return result
+        return ScaleMeta(scores = scores, flags = flags)
     }
 
     private fun levelByMood(moodAvg: Double?, phq9: Double?, polarity: Double?): SeverityLevel {

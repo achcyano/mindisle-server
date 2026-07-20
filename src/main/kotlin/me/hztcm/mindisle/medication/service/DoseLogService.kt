@@ -79,6 +79,12 @@ class DoseLogService(
         if (!plannedTime.matches(Regex("^\\d{2}:\\d{2}$"))) {
             throw AppException(ErrorCodes.MEDICATION_INVALID_ARGUMENT, "plannedTime must be HH:mm", HttpStatusCode.BadRequest)
         }
+        val parts = plannedTime.split(':')
+        val hour = parts[0].toIntOrNull() ?: -1
+        val minute = parts[1].toIntOrNull() ?: -1
+        if (hour !in 0..23 || minute !in 0..59) {
+            throw AppException(ErrorCodes.MEDICATION_INVALID_ARGUMENT, "plannedTime out of range", HttpStatusCode.BadRequest)
+        }
         val localDate = parseLocalDateOrTodayPlus8(request.localDate)
         val now = utcNow()
         val item = DatabaseFactory.dbQuery {
@@ -92,6 +98,23 @@ class DoseLogService(
                 "Medication not found",
                 HttpStatusCode.NotFound
             )
+            val recorded = med[UserMedicationsTable.recordedDateLocal]
+            val endDate = med[UserMedicationsTable.endDateLocal]
+            if (localDate.isBefore(recorded) || localDate.isAfter(endDate)) {
+                throw AppException(
+                    ErrorCodes.MEDICATION_INVALID_ARGUMENT,
+                    "localDate outside medication window",
+                    HttpStatusCode.BadRequest
+                )
+            }
+            val scheduledTimes = parseDoseTimes(med[UserMedicationsTable.doseTimesJson])
+            if (plannedTime !in scheduledTimes) {
+                throw AppException(
+                    ErrorCodes.MEDICATION_INVALID_ARGUMENT,
+                    "plannedTime is not on medication schedule",
+                    HttpStatusCode.BadRequest
+                )
+            }
             val existing = MedicationDoseLogsTable.selectAll().where {
                 (MedicationDoseLogsTable.userId eq userRef) and
                     (MedicationDoseLogsTable.medicationId eq med[UserMedicationsTable.id]) and
@@ -126,7 +149,12 @@ class DoseLogService(
                 actedAt = now.toIsoOffsetUtc()
             )
         }
-        runCatching { stateService.recompute(userId, source = "DOSE_CHECKIN") }
+        try {
+            stateService.recompute(userId, source = "DOSE_CHECKIN")
+        } catch (ex: Exception) {
+            org.slf4j.LoggerFactory.getLogger(DoseLogService::class.java)
+                .error("State recompute failed after dose check-in userId={}", userId, ex)
+        }
         return item
     }
 
@@ -148,6 +176,10 @@ class DoseLogService(
                 (UserMedicationsTable.userId eq userRef) and UserMedicationsTable.deletedAt.isNull()
             }.toList()
             if (meds.isEmpty()) return null
+            val nowPlus8 = utcNow().atOffset(java.time.ZoneOffset.UTC)
+                .withOffsetSameInstant(java.time.ZoneOffset.ofHours(8))
+            val today = nowPlus8.toLocalDate()
+            val nowMinutes = nowPlus8.hour * 60 + nowPlus8.minute
             var planned = 0
             var taken = 0
             var day = start
@@ -157,8 +189,17 @@ class DoseLogService(
                     val endDate = med[UserMedicationsTable.endDateLocal]
                     if (!day.isBefore(recorded) && !day.isAfter(endDate)) {
                         val times = parseDoseTimes(med[UserMedicationsTable.doseTimesJson])
-                        planned += times.size
                         times.forEach { time ->
+                            // Exclude future dose slots on the current day from the denominator.
+                            if (day.isEqual(today)) {
+                                val hm = time.split(':')
+                                val mins = (hm.getOrNull(0)?.toIntOrNull() ?: 0) * 60 +
+                                    (hm.getOrNull(1)?.toIntOrNull() ?: 0)
+                                if (mins > nowMinutes) return@forEach
+                            } else if (day.isAfter(today)) {
+                                return@forEach
+                            }
+                            planned += 1
                             val log = MedicationDoseLogsTable.selectAll().where {
                                 (MedicationDoseLogsTable.userId eq userRef) and
                                     (MedicationDoseLogsTable.medicationId eq med[UserMedicationsTable.id]) and

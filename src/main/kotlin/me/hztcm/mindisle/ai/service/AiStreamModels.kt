@@ -30,6 +30,7 @@ internal data class GenerationContext(
     val userId: Long,
     val conversationId: Long,
     val currentUserMessage: String,
+    val userMessageId: Long? = null,
     val temperature: Double?,
     val maxTokens: Int?,
     val messages: List<ChatMessage>,

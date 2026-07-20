@@ -33,7 +33,10 @@ import java.time.LocalDate
 private const val NOTE_MAX_LENGTH = 1000
 private const val SIDE_EFFECT_SYMPTOM_MAX_LENGTH = 200
 
-internal class DoctorMonitoringDomainService(private val deps: DoctorServiceDeps) {
+internal class DoctorMonitoringDomainService(
+    private val deps: DoctorServiceDeps,
+    private val stateService: me.hztcm.mindisle.state.service.PatientStateService? = null
+) {
     suspend fun createPatientMedication(
         doctorId: Long,
         patientUserId: Long,
@@ -149,7 +152,7 @@ internal class DoctorMonitoringDomainService(private val deps: DoctorServiceDeps
         validateTextLength("note", request.note, NOTE_MAX_LENGTH)
         val recordedAt = parseRecordedAt(request.recordedAt)
 
-        return DatabaseFactory.dbQuery {
+        val response = DatabaseFactory.dbQuery {
             val now = utcNow()
             val userRef = EntityID(userId, UsersTable)
             requireUser(userRef)
@@ -164,6 +167,8 @@ internal class DoctorMonitoringDomainService(private val deps: DoctorServiceDeps
             val row = UserSideEffectsTable.selectAll().where { UserSideEffectsTable.id eq insertedId }.first()
             row.toSideEffectResponse()
         }
+        runCatching { stateService?.recompute(userId, source = "SIDE_EFFECT") }
+        return response
     }
 
     suspend fun listUserSideEffects(userId: Long, limit: Int, cursor: Long?): List<SideEffectItemResponse> {

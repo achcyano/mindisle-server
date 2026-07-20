@@ -159,7 +159,7 @@ class InterventionService(
     }
 
     suspend fun feedback(userId: Long, deliveryId: Long, request: InterventionFeedbackRequest) {
-        val moduleCodeAndDims = DatabaseFactory.dbQuery {
+        val weightDelta = DatabaseFactory.dbQuery {
             val userRef = EntityID(userId, UsersTable)
             val row = InterventionDeliveriesTable.selectAll().where {
                 (InterventionDeliveriesTable.id eq deliveryId) and
@@ -173,16 +173,18 @@ class InterventionService(
             val existing = InterventionFeedbackTable.selectAll().where {
                 InterventionFeedbackTable.deliveryId eq row[InterventionDeliveriesTable.id]
             }.firstOrNull()
-            if (existing == null) {
-                InterventionFeedbackTable.insert {
-                    it[InterventionFeedbackTable.deliveryId] = row[InterventionDeliveriesTable.id]
-                    it[adopted] = request.adopted
-                    it[completed] = request.completed
-                    it[durationSec] = request.durationSec
-                    it[moodBefore] = request.moodBefore
-                    it[moodAfter] = request.moodAfter
-                    it[createdAt] = now
-                }
+            // Idempotent: already recorded feedback must not re-adjust weights.
+            if (existing != null) {
+                return@dbQuery null
+            }
+            InterventionFeedbackTable.insert {
+                it[InterventionFeedbackTable.deliveryId] = row[InterventionDeliveriesTable.id]
+                it[adopted] = request.adopted
+                it[completed] = request.completed
+                it[durationSec] = request.durationSec
+                it[moodBefore] = request.moodBefore
+                it[moodAfter] = request.moodAfter
+                it[createdAt] = now
             }
             InterventionDeliveriesTable.update({ InterventionDeliveriesTable.id eq deliveryId }) {
                 it[status] = if (request.completed) {
@@ -206,12 +208,12 @@ class InterventionService(
                     else -> -0.12
                 }
             )
-        }
+        } ?: return
         adjustWeights(
             userId = userId,
-            moduleCode = moduleCodeAndDims.first,
-            dims = moduleCodeAndDims.second,
-            delta = moduleCodeAndDims.third
+            moduleCode = weightDelta.first,
+            dims = weightDelta.second,
+            delta = weightDelta.third
         )
     }
 

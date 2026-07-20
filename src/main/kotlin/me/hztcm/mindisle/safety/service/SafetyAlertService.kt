@@ -21,21 +21,28 @@ import me.hztcm.mindisle.model.SafetyAlertListResponse
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.isNull
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
+import org.slf4j.LoggerFactory
 
 class SafetyAlertService {
     private val json = Json { ignoreUnknownKeys = true }
+    private val log = LoggerFactory.getLogger(SafetyAlertService::class.java)
 
     suspend fun raise(
         userId: Long,
         riskLevel: RiskLevel,
         reasonCodes: List<String>,
-        evidence: String?
+        evidence: String?,
+        cooldownHours: Long = DEFAULT_COOLDOWN_HOURS
     ): Long {
         val now = utcNow()
+        val cooldownFrom = now.minusHours(cooldownHours)
         return DatabaseFactory.dbQuery {
             val userRef = EntityID(userId, UsersTable)
             val doctorId = DoctorPatientBindingsTable.selectAll().where {
@@ -43,11 +50,35 @@ class SafetyAlertService {
                     (DoctorPatientBindingsTable.status eq DoctorPatientBindingStatus.ACTIVE)
             }.firstOrNull()?.get(DoctorPatientBindingsTable.doctorId)?.value
 
+            val normalizedReasons = reasonCodes.map { it.trim() }.filter { it.isNotEmpty() }.sorted()
+            val reasonKey = json.encodeToString(normalizedReasons)
+            val recent = SafetyAlertsTable.selectAll().where {
+                (SafetyAlertsTable.userId eq userRef) and
+                    (SafetyAlertsTable.status eq SafetyAlertStatus.OPEN) and
+                    (SafetyAlertsTable.createdAt greaterEq cooldownFrom)
+            }.toList().firstOrNull { row ->
+                row[SafetyAlertsTable.reasonCodesJson] == reasonKey ||
+                    normalizedReasons.any { code ->
+                        row[SafetyAlertsTable.reasonCodesJson].contains(code)
+                    }
+            }
+            if (recent != null) {
+                val existingId = recent[SafetyAlertsTable.id].value
+                if (recent[SafetyAlertsTable.doctorId] == null && doctorId != null) {
+                    SafetyAlertsTable.update({ SafetyAlertsTable.id eq recent[SafetyAlertsTable.id] }) {
+                        it[SafetyAlertsTable.doctorId] = doctorId
+                        it[updatedAt] = now
+                    }
+                }
+                log.info("Deduped safety alert userId={} alertId={} reasons={}", userId, existingId, normalizedReasons)
+                return@dbQuery existingId
+            }
+
             SafetyAlertsTable.insert {
                 it[SafetyAlertsTable.userId] = userRef
                 it[SafetyAlertsTable.doctorId] = doctorId
                 it[SafetyAlertsTable.riskLevel] = riskLevel
-                it[reasonCodesJson] = json.encodeToString(reasonCodes)
+                it[reasonCodesJson] = reasonKey
                 it[evidenceJson] = evidence
                 it[status] = SafetyAlertStatus.OPEN
                 it[createdAt] = now
@@ -56,12 +87,34 @@ class SafetyAlertService {
         }
     }
 
+    /** Assign OPEN alerts that were raised before doctor binding. */
+    suspend fun assignOrphanAlerts(userId: Long, doctorId: Long): Int {
+        val now = utcNow()
+        return DatabaseFactory.dbQuery {
+            val userRef = EntityID(userId, UsersTable)
+            SafetyAlertsTable.update({
+                (SafetyAlertsTable.userId eq userRef) and
+                    SafetyAlertsTable.doctorId.isNull() and
+                    (
+                        (SafetyAlertsTable.status eq SafetyAlertStatus.OPEN) or
+                            (SafetyAlertsTable.status eq SafetyAlertStatus.ACKED)
+                        )
+            }) {
+                it[SafetyAlertsTable.doctorId] = doctorId
+                it[updatedAt] = now
+            }
+        }
+    }
+
     suspend fun listForDoctor(doctorId: Long, onlyOpen: Boolean = true): SafetyAlertListResponse {
         return DatabaseFactory.dbQuery {
             val rows = SafetyAlertsTable.selectAll().where {
                 SafetyAlertsTable.doctorId eq doctorId
             }.orderBy(SafetyAlertsTable.createdAt, SortOrder.DESC).limit(100).toList()
-                .filter { !onlyOpen || it[SafetyAlertsTable.status] == SafetyAlertStatus.OPEN }
+                .filter {
+                    if (!onlyOpen) true
+                    else it[SafetyAlertsTable.status] == SafetyAlertStatus.OPEN
+                }
 
             val items = rows.map { row ->
                 val uid = row[SafetyAlertsTable.userId].value
@@ -128,5 +181,9 @@ class SafetyAlertService {
                 it[updatedAt] = now
             }
         }
+    }
+
+    companion object {
+        private const val DEFAULT_COOLDOWN_HOURS = 24L
     }
 }
