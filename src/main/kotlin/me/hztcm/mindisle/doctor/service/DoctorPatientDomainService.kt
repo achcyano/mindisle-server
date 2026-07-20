@@ -53,6 +53,7 @@ import me.hztcm.mindisle.model.ScaleDeliveryModeDto
 import me.hztcm.mindisle.model.ScaleHistoryItem
 import me.hztcm.mindisle.model.ScaleDimensionResult
 import me.hztcm.mindisle.model.ScaleResultResponse
+import me.hztcm.mindisle.medication.service.DoseLogService
 import me.hztcm.mindisle.model.UpdatePatientDiagnosisRequest
 import me.hztcm.mindisle.model.UpdatePatientGroupingRequest
 import org.jetbrains.exposed.dao.id.EntityID
@@ -814,10 +815,17 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         if (patientRefs.isEmpty()) {
             return emptyMap()
         }
+        val todayPlus8 = snapshotAt.atOffset(java.time.ZoneOffset.UTC)
+            .withOffsetSameInstant(java.time.ZoneOffset.ofHours(8))
+            .toLocalDate()
+        val adherenceFrom = todayPlus8.minusDays(6)
+        fun adherenceOf(patientId: Long): Double? =
+            DoseLogService.computeAdherenceInTx(patientId, adherenceFrom, todayPlus8)
+
         if (scaleCodeByScaleId.isEmpty()) {
             return patientRefs.associate { patientRef ->
                 patientRef.value to MetricSnapshotResult(
-                    metrics = PatientMetricSnapshot(adherence = null),
+                    metrics = PatientMetricSnapshot(adherence = adherenceOf(patientRef.value)),
                     lastSubmittedAt = null
                 )
             }
@@ -836,7 +844,7 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         if (sessions.isEmpty()) {
             return patientRefs.associate { patientRef ->
                 patientRef.value to MetricSnapshotResult(
-                    metrics = PatientMetricSnapshot(adherence = null),
+                    metrics = PatientMetricSnapshot(adherence = adherenceOf(patientRef.value)),
                     lastSubmittedAt = null
                 )
             }
@@ -880,7 +888,7 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
                     phq9Total = scoreByCode["PHQ9"],
                     gad7Total = scoreByCode["GAD7"],
                     psqiTotal = scoreByCode["PSQI"],
-                    adherence = null
+                    adherence = adherenceOf(patientId)
                 ),
                 lastSubmittedAt = lastSubmittedAtByPatient[patientId]
             )

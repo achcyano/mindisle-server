@@ -134,48 +134,55 @@ class DoseLogService(
         val end = utcNow().toLocalDatePlus8()
         val start = end.minusDays((days - 1).toLong())
         return DatabaseFactory.dbQuery {
-            computeAdherence(userId, start, end)
+            computeAdherenceInTx(userId, start, end)
         }
     }
 
-    fun computeAdherence(userId: Long, start: LocalDate, end: LocalDate): Double? {
-        val userRef = EntityID(userId, UsersTable)
-        val meds = UserMedicationsTable.selectAll().where {
-            (UserMedicationsTable.userId eq userRef) and UserMedicationsTable.deletedAt.isNull()
-        }.toList()
-        if (meds.isEmpty()) return null
-        var planned = 0
-        var taken = 0
-        var day = start
-        while (!day.isAfter(end)) {
-            meds.forEach { med ->
-                val recorded = med[UserMedicationsTable.recordedDateLocal]
-                val endDate = med[UserMedicationsTable.endDateLocal]
-                if (!day.isBefore(recorded) && !day.isAfter(endDate)) {
-                    val times = parseDoseTimes(med[UserMedicationsTable.doseTimesJson])
-                    planned += times.size
-                    times.forEach { time ->
-                        val log = MedicationDoseLogsTable.selectAll().where {
-                            (MedicationDoseLogsTable.userId eq userRef) and
-                                (MedicationDoseLogsTable.medicationId eq med[UserMedicationsTable.id]) and
-                                (MedicationDoseLogsTable.localDate eq day) and
-                                (MedicationDoseLogsTable.plannedTime eq time)
-                        }.firstOrNull()
-                        if (log != null && log[MedicationDoseLogsTable.status] == DoseLogStatus.TAKEN) {
-                            taken += 1
+    companion object {
+        private val doseTimesJson = Json { ignoreUnknownKeys = true }
+
+        /** Must be called inside an Exposed transaction. */
+        fun computeAdherenceInTx(userId: Long, start: LocalDate, end: LocalDate): Double? {
+            val userRef = EntityID(userId, UsersTable)
+            val meds = UserMedicationsTable.selectAll().where {
+                (UserMedicationsTable.userId eq userRef) and UserMedicationsTable.deletedAt.isNull()
+            }.toList()
+            if (meds.isEmpty()) return null
+            var planned = 0
+            var taken = 0
+            var day = start
+            while (!day.isAfter(end)) {
+                meds.forEach { med ->
+                    val recorded = med[UserMedicationsTable.recordedDateLocal]
+                    val endDate = med[UserMedicationsTable.endDateLocal]
+                    if (!day.isBefore(recorded) && !day.isAfter(endDate)) {
+                        val times = parseDoseTimes(med[UserMedicationsTable.doseTimesJson])
+                        planned += times.size
+                        times.forEach { time ->
+                            val log = MedicationDoseLogsTable.selectAll().where {
+                                (MedicationDoseLogsTable.userId eq userRef) and
+                                    (MedicationDoseLogsTable.medicationId eq med[UserMedicationsTable.id]) and
+                                    (MedicationDoseLogsTable.localDate eq day) and
+                                    (MedicationDoseLogsTable.plannedTime eq time)
+                            }.firstOrNull()
+                            if (log != null && log[MedicationDoseLogsTable.status] == DoseLogStatus.TAKEN) {
+                                taken += 1
+                            }
                         }
                     }
                 }
+                day = day.plusDays(1)
             }
-            day = day.plusDays(1)
+            if (planned <= 0) return null
+            return taken.toDouble() / planned.toDouble()
         }
-        if (planned <= 0) return null
-        return taken.toDouble() / planned.toDouble()
+
+        private fun parseDoseTimes(raw: String): List<String> {
+            return runCatching { doseTimesJson.decodeFromString<List<String>>(raw) }.getOrDefault(emptyList())
+                .map { it.trim() }
+                .filter { it.matches(Regex("^\\d{2}:\\d{2}$")) }
+        }
     }
 
-    private fun parseDoseTimes(raw: String): List<String> {
-        return runCatching { json.decodeFromString<List<String>>(raw) }.getOrDefault(emptyList())
-            .map { it.trim() }
-            .filter { it.matches(Regex("^\\d{2}:\\d{2}$")) }
-    }
+    private fun parseDoseTimes(raw: String): List<String> = Companion.parseDoseTimes(raw)
 }
