@@ -75,7 +75,8 @@ object DatabaseFactory {
                 InterventionFeedbackTable,
                 UiTasksTable,
                 SafetyAlertsTable,
-                AppUsageEventsTable
+                AppUsageEventsTable,
+                InterventionMatchWeightsTable
             )
             ScaleSeedData.seedDefaultsIfEmpty()
             InterventionSeedData.seedDefaultsIfEmpty()

@@ -11,8 +11,8 @@ import me.hztcm.mindisle.db.DatabaseFactory
 import me.hztcm.mindisle.db.InterventionDeliveriesTable
 import me.hztcm.mindisle.db.InterventionDeliveryStatus
 import me.hztcm.mindisle.db.InterventionFeedbackTable
+import me.hztcm.mindisle.db.InterventionMatchWeightsTable
 import me.hztcm.mindisle.db.InterventionModulesTable
-import me.hztcm.mindisle.db.PatientStateSnapshotsTable
 import me.hztcm.mindisle.db.SeverityLevel
 import me.hztcm.mindisle.db.UiTaskType
 import me.hztcm.mindisle.db.UsersTable
@@ -159,7 +159,7 @@ class InterventionService(
     }
 
     suspend fun feedback(userId: Long, deliveryId: Long, request: InterventionFeedbackRequest) {
-        DatabaseFactory.dbQuery {
+        val moduleCodeAndDims = DatabaseFactory.dbQuery {
             val userRef = EntityID(userId, UsersTable)
             val row = InterventionDeliveriesTable.selectAll().where {
                 (InterventionDeliveriesTable.id eq deliveryId) and
@@ -194,39 +194,117 @@ class InterventionService(
                 }
                 it[updatedAt] = now
             }
+            val dims = runCatching {
+                json.decodeFromString<List<String>>(row[InterventionDeliveriesTable.stateDimsJson] ?: "[]")
+            }.getOrDefault(emptyList())
+            Triple(
+                row[InterventionDeliveriesTable.moduleCode],
+                dims,
+                when {
+                    request.completed -> 0.15
+                    request.adopted -> 0.05
+                    else -> -0.12
+                }
+            )
         }
+        adjustWeights(
+            userId = userId,
+            moduleCode = moduleCodeAndDims.first,
+            dims = moduleCodeAndDims.second,
+            delta = moduleCodeAndDims.third
+        )
     }
 
     suspend fun matchFromState(userId: Long, state: PatientStateResponse, triggerType: String): List<InterventionDeliveryResponse> {
-        val candidates = mutableListOf<String>()
-        fun addIf(level: String, module: String) {
+        data class Candidate(val dim: String, val module: String, val basePriority: Int)
+
+        val candidates = mutableListOf<Candidate>()
+        fun addIf(level: String, dim: String, module: String, priority: Int) {
             if (level == SeverityLevel.MODERATE.name || level == SeverityLevel.SEVERE.name) {
-                candidates += module
+                candidates += Candidate(dim, module, priority)
             }
         }
-        // Priority roughly matches feasibility table 4
+        // Lower priority number = higher precedence (table 4).
         if (state.riskLevel == "HIGH") return emptyList()
-        addIf(state.medicationDistress, "med_comm_list")
-        addIf(state.anxiety, "breathing_5min")
-        addIf(state.lowMood, "ba_one_step")
-        addIf(state.reducedActivity, "ba_one_step")
-        addIf(state.rumination, "mindfulness_5min")
-        addIf(state.sleepDisturbance, "sleep_hygiene")
-        addIf(state.socialWithdrawal, "ba_one_step")
+        addIf(state.medicationDistress, "med", "med_comm_list", 1)
+        addIf(state.anxiety, "anxiety", "breathing_5min", 2)
         if (state.anxiety == SeverityLevel.SEVERE.name) {
-            candidates.add(0, "pmr_10min")
+            candidates += Candidate("anxiety", "pmr_10min", 2)
         }
-        val unique = candidates.distinct().take(2)
-        val dims = listOfNotNull(
-            state.lowMood.takeIf { it != "NONE" }?.let { "lowMood" },
-            state.anxiety.takeIf { it != "NONE" }?.let { "anxiety" },
-            state.sleepDisturbance.takeIf { it != "NONE" }?.let { "sleep" },
-            state.medicationDistress.takeIf { it != "NONE" }?.let { "med" }
-        )
-        return unique.mapNotNull { code ->
+        addIf(state.lowMood, "lowMood", "ba_one_step", 3)
+        addIf(state.reducedActivity, "activity", "ba_one_step", 3)
+        addIf(state.rumination, "rumination", "mindfulness_5min", 4)
+        addIf(state.sleepDisturbance, "sleep", "sleep_hygiene", 5)
+        addIf(state.socialWithdrawal, "social", "ba_one_step", 6)
+
+        val weights = DatabaseFactory.dbQuery {
+            val userRef = EntityID(userId, UsersTable)
+            InterventionMatchWeightsTable.selectAll().where {
+                InterventionMatchWeightsTable.userId eq userRef
+            }.associate {
+                (it[InterventionMatchWeightsTable.stateDim] to it[InterventionMatchWeightsTable.moduleCode]) to
+                    it[InterventionMatchWeightsTable.weight]
+            }
+        }
+
+        val ranked = candidates
+            .groupBy { it.module }
+            .map { (module, list) ->
+                val best = list.minBy { it.basePriority }
+                val w = list.maxOf { weights[it.dim to module] ?: 1.0 }
+                Triple(module, best.basePriority, w)
+            }
+            .sortedWith(compareBy<Triple<String, Int, Double>> { it.second }.thenByDescending { it.third })
+            .map { it.first }
+            .distinct()
+            .take(2)
+
+        val dims = candidates.map { it.dim }.distinct()
+        return ranked.mapNotNull { code ->
             runCatching {
                 startModule(userId, code, triggerType, stateDims = dims)
             }.getOrNull()
+        }
+    }
+
+    private suspend fun adjustWeights(
+        userId: Long,
+        moduleCode: String,
+        dims: List<String>,
+        delta: Double
+    ) {
+        if (dims.isEmpty()) return
+        // Never down-weight crisis/med safety modules below floor via dismiss.
+        val floor = if (moduleCode == "med_comm_list") 0.8 else 0.2
+        val ceiling = 3.0
+        DatabaseFactory.dbQuery {
+            val userRef = EntityID(userId, UsersTable)
+            val now = utcNow()
+            dims.forEach { dim ->
+                val existing = InterventionMatchWeightsTable.selectAll().where {
+                    (InterventionMatchWeightsTable.userId eq userRef) and
+                        (InterventionMatchWeightsTable.stateDim eq dim) and
+                        (InterventionMatchWeightsTable.moduleCode eq moduleCode)
+                }.firstOrNull()
+                val next = ((existing?.get(InterventionMatchWeightsTable.weight) ?: 1.0) + delta)
+                    .coerceIn(floor, ceiling)
+                if (existing == null) {
+                    InterventionMatchWeightsTable.insert {
+                        it[InterventionMatchWeightsTable.userId] = userRef
+                        it[stateDim] = dim
+                        it[InterventionMatchWeightsTable.moduleCode] = moduleCode
+                        it[weight] = next
+                        it[updatedAt] = now
+                    }
+                } else {
+                    InterventionMatchWeightsTable.update({
+                        InterventionMatchWeightsTable.id eq existing[InterventionMatchWeightsTable.id]
+                    }) {
+                        it[weight] = next
+                        it[updatedAt] = now
+                    }
+                }
+            }
         }
     }
 

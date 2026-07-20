@@ -771,3 +771,17 @@ object AppUsageEventsTable : LongIdTable("app_usage_events") {
         index(false, userId, createdAt)
     }
 }
+
+object InterventionMatchWeightsTable : LongIdTable("intervention_match_weights") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE)
+    val stateDim = varchar("state_dim", 32)
+    val moduleCode = varchar("module_code", 64)
+    val weight = double("weight").default(1.0)
+    val updatedAt = datetime("updated_at")
+
+    init {
+        uniqueIndex(userId, stateDim, moduleCode)
+        index(false, userId, moduleCode)
+    }
+}
+
