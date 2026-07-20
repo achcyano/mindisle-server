@@ -76,7 +76,11 @@ object DatabaseFactory {
                 UiTasksTable,
                 SafetyAlertsTable,
                 AppUsageEventsTable,
-                InterventionMatchWeightsTable
+                InterventionMatchWeightsTable,
+                ResearchEnrollmentsTable,
+                ResearchVisitsTable,
+                ResearchAeEventsTable,
+                ResearchQcReviewsTable
             )
             ScaleSeedData.seedDefaultsIfEmpty()
             InterventionSeedData.seedDefaultsIfEmpty()

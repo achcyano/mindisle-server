@@ -97,14 +97,20 @@ private suspend fun ensureBound(doctorId: Long, patientUserId: Long) {
 private suspend fun exportConversations(patientUserId: Long): ConversationExportResponse {
     return DatabaseFactory.dbQuery {
         val userRef = EntityID(patientUserId, UsersTable)
+        val totalConversations = AiConversationsTable.selectAll().where {
+            AiConversationsTable.userId eq userRef
+        }.count().toInt()
         val conversations = AiConversationsTable.selectAll().where {
             AiConversationsTable.userId eq userRef
         }.orderBy(AiConversationsTable.updatedAt, SortOrder.DESC).limit(50).toList()
+        var messageTruncated = false
         val items = conversations.map { conv ->
             val convId = conv[AiConversationsTable.id].value
-            val messages = AiMessagesTable.selectAll().where {
+            val allMessages = AiMessagesTable.selectAll().where {
                 AiMessagesTable.conversationId eq conv[AiConversationsTable.id]
-            }.orderBy(AiMessagesTable.id, SortOrder.ASC).limit(500).map { msg ->
+            }.orderBy(AiMessagesTable.id, SortOrder.ASC).toList()
+            if (allMessages.size > 500) messageTruncated = true
+            val messages = allMessages.take(500).map { msg ->
                 val nlp = AiNlpFeaturesTable.selectAll().where {
                     AiNlpFeaturesTable.messageId eq msg[AiMessagesTable.id].value
                 }.firstOrNull()
@@ -126,7 +132,9 @@ private suspend fun exportConversations(patientUserId: Long): ConversationExport
         ConversationExportResponse(
             patientUserId = patientUserId,
             exportedAt = utcNow().toIsoOffsetUtc(),
-            conversations = items
+            conversations = items,
+            totalConversations = totalConversations,
+            truncated = totalConversations > items.size || messageTruncated
         )
     }
 }

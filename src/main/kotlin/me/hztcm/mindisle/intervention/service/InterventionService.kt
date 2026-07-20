@@ -228,6 +228,23 @@ class InterventionService(
         }
         // Lower priority number = higher precedence (table 4).
         if (state.riskLevel == "HIGH") return emptyList()
+        val todayDeliveries = DatabaseFactory.dbQuery {
+            val userRef = EntityID(userId, UsersTable)
+            val now = utcNow()
+            val dayStartUtc = now.atOffset(java.time.ZoneOffset.UTC)
+                .withOffsetSameInstant(java.time.ZoneOffset.ofHours(8))
+                .toLocalDate()
+                .atStartOfDay()
+                .atOffset(java.time.ZoneOffset.ofHours(8))
+                .withOffsetSameInstant(java.time.ZoneOffset.UTC)
+                .toLocalDateTime()
+            InterventionDeliveriesTable.selectAll().where {
+                (InterventionDeliveriesTable.userId eq userRef) and
+                    (InterventionDeliveriesTable.createdAt greaterEq dayStartUtc)
+            }.count().toInt()
+        }
+        // Active push budget: at most 2 auto-matched modules per day.
+        if (triggerType != "USER" && todayDeliveries >= 2) return emptyList()
         addIf(state.medicationDistress, "med", "med_comm_list", 1)
         addIf(state.anxiety, "anxiety", "breathing_5min", 2)
         if (state.anxiety == SeverityLevel.SEVERE.name) {

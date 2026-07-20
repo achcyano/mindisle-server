@@ -47,9 +47,19 @@ class MindIsleToolRegistry(
     suspend fun execute(name: String, ctx: ToolContext, argumentsJson: String): ToolExecutionResult {
         val tool = byName[name]
             ?: return ToolExecutionResult(false, "Unknown tool: $name")
+        val trimmed = argumentsJson.trim()
+        if (trimmed.isNotEmpty() && trimmed != "{}") {
+            val parsed = runCatching { Json.parseToJsonElement(trimmed) }.getOrNull()
+            if (parsed !is JsonObject) {
+                return ToolExecutionResult(false, "Invalid tool arguments JSON")
+            }
+        }
         val args = runCatching {
-            Json.parseToJsonElement(argumentsJson).let { it as? JsonObject } ?: buildJsonObject { }
-        }.getOrDefault(buildJsonObject { })
+            Json.parseToJsonElement(if (trimmed.isEmpty()) "{}" else trimmed).let { it as? JsonObject }
+                ?: return ToolExecutionResult(false, "Tool arguments must be a JSON object")
+        }.getOrElse {
+            return ToolExecutionResult(false, "Invalid tool arguments JSON")
+        }
         return runCatching { tool.execute(ctx, args) }.getOrElse {
             ToolExecutionResult(false, it.message ?: "tool failed")
         }
@@ -101,7 +111,12 @@ fun buildDefaultToolRegistry(
                 put("required", kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive("scaleCode"))))
             }
             override suspend fun execute(ctx: ToolContext, args: JsonObject): ToolExecutionResult {
-                val code = args["scaleCode"]?.jsonPrimitive?.contentOrNull?.uppercase() ?: "PHQ9"
+                val allowed = setOf("PHQ9", "GAD7", "PSQI", "ISI", "TESS", "SCL90", "WSAS", "C-SSRS")
+                val code = args["scaleCode"]?.jsonPrimitive?.contentOrNull?.uppercase()
+                    ?: return ToolExecutionResult(false, "scaleCode is required")
+                if (code !in allowed) {
+                    return ToolExecutionResult(false, "Unknown scaleCode: $code")
+                }
                 val reason = args["reason"]?.jsonPrimitive?.contentOrNull ?: "根据当前状态建议评估"
                 uiTaskService.create(
                     userId = ctx.userId,

@@ -785,3 +785,80 @@ object InterventionMatchWeightsTable : LongIdTable("intervention_match_weights")
     }
 }
 
+enum class ResearchArm {
+    ADAPTIVE,
+    USUAL_CARE
+}
+
+enum class ResearchEnrollmentStatus {
+    SCREENING,
+    ENROLLED,
+    WITHDRAWN,
+    COMPLETED
+}
+
+enum class ResearchAeSeverity {
+    MILD,
+    MODERATE,
+    SEVERE,
+    SAE
+}
+
+object ResearchEnrollmentsTable : LongIdTable("research_enrollments") {
+    val userId = reference("user_id", UsersTable, onDelete = ReferenceOption.CASCADE).uniqueIndex()
+    val arm = enumerationByName("arm", 16, ResearchArm::class).nullable()
+    val status = enumerationByName("status", 16, ResearchEnrollmentStatus::class)
+        .default(ResearchEnrollmentStatus.SCREENING)
+    val consentAt = datetime("consent_at").nullable()
+    val randomizedAt = datetime("randomized_at").nullable()
+    val baselinePhq9 = double("baseline_phq9").nullable()
+    val inclusionNotes = text("inclusion_notes").nullable()
+    val exclusionHit = bool("exclusion_hit").default(false)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+}
+
+object ResearchVisitsTable : LongIdTable("research_visits") {
+    val enrollmentId = reference("enrollment_id", ResearchEnrollmentsTable, onDelete = ReferenceOption.CASCADE)
+    val visitCode = varchar("visit_code", 32)
+    val windowStart = datetime("window_start").nullable()
+    val windowEnd = datetime("window_end").nullable()
+    val completedAt = datetime("completed_at").nullable()
+    val instrumentsJson = text("instruments_json").nullable()
+    val createdAt = datetime("created_at")
+
+    init {
+        uniqueIndex(enrollmentId, visitCode)
+        index(false, enrollmentId, visitCode)
+    }
+}
+
+object ResearchAeEventsTable : LongIdTable("research_ae_events") {
+    val enrollmentId = reference("enrollment_id", ResearchEnrollmentsTable, onDelete = ReferenceOption.CASCADE)
+    val title = varchar("title", 200)
+    val severity = enumerationByName("severity", 16, ResearchAeSeverity::class)
+    val description = text("description").nullable()
+    val onsetAt = datetime("onset_at")
+    val resolvedAt = datetime("resolved_at").nullable()
+    val reportedToEthicsAt = datetime("reported_to_ethics_at").nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    init {
+        index(false, enrollmentId, createdAt)
+    }
+}
+
+object ResearchQcReviewsTable : LongIdTable("research_qc_reviews") {
+    val enrollmentId = reference("enrollment_id", ResearchEnrollmentsTable, onDelete = ReferenceOption.CASCADE)
+    val conversationId = long("conversation_id").nullable()
+    val reviewer = varchar("reviewer", 120)
+    val appropriatenessScore = integer("appropriateness_score").nullable()
+    val notes = text("notes").nullable()
+    val createdAt = datetime("created_at")
+
+    init {
+        index(false, enrollmentId, createdAt)
+    }
+}
+

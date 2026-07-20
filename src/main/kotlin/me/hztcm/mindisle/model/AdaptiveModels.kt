@@ -231,7 +231,9 @@ data class ConversationExportMessage(
 data class ConversationExportResponse(
     val patientUserId: Long,
     val exportedAt: String,
-    val conversations: List<ConversationExportItem>
+    val conversations: List<ConversationExportItem>,
+    val totalConversations: Int = 0,
+    val truncated: Boolean = false
 )
 
 @Serializable

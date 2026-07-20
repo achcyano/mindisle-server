@@ -824,8 +824,14 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
 
         if (scaleCodeByScaleId.isEmpty()) {
             return patientRefs.associate { patientRef ->
+                val pid = patientRef.value
                 patientRef.value to MetricSnapshotResult(
-                    metrics = PatientMetricSnapshot(adherence = adherenceOf(patientRef.value)),
+                    metrics = PatientMetricSnapshot(
+                        adherence = adherenceOf(pid),
+                        riskLevel = latestRisk(pid),
+                        openAlertCount = openAlertCount(pid),
+                        emaCompletionRate7d = emaCompletionRate7d(pid, todayPlus8)
+                    ),
                     lastSubmittedAt = null
                 )
             }
@@ -843,8 +849,14 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
             .toList()
         if (sessions.isEmpty()) {
             return patientRefs.associate { patientRef ->
+                val pid = patientRef.value
                 patientRef.value to MetricSnapshotResult(
-                    metrics = PatientMetricSnapshot(adherence = adherenceOf(patientRef.value)),
+                    metrics = PatientMetricSnapshot(
+                        adherence = adherenceOf(pid),
+                        riskLevel = latestRisk(pid),
+                        openAlertCount = openAlertCount(pid),
+                        emaCompletionRate7d = emaCompletionRate7d(pid, todayPlus8)
+                    ),
                     lastSubmittedAt = null
                 )
             }
@@ -882,17 +894,53 @@ internal class DoctorPatientDomainService(private val deps: DoctorServiceDeps) {
         return patientRefs.associate { patientRef ->
             val patientId = patientRef.value
             val scoreByCode = scoreByPatientAndCode[patientId].orEmpty()
+            val risk = latestRisk(patientId)
+            val openAlerts = openAlertCount(patientId)
+            val emaRate = emaCompletionRate7d(patientId, todayPlus8)
             patientId to MetricSnapshotResult(
                 metrics = PatientMetricSnapshot(
                     scl90Total = scoreByCode["SCL90"],
                     phq9Total = scoreByCode["PHQ9"],
                     gad7Total = scoreByCode["GAD7"],
                     psqiTotal = scoreByCode["PSQI"],
-                    adherence = adherenceOf(patientId)
+                    adherence = adherenceOf(patientId),
+                    riskLevel = risk,
+                    openAlertCount = openAlerts,
+                    emaCompletionRate7d = emaRate
                 ),
                 lastSubmittedAt = lastSubmittedAtByPatient[patientId]
             )
         }
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.latestRisk(patientId: Long): String? {
+        return me.hztcm.mindisle.db.PatientStateSnapshotsTable.selectAll().where {
+            me.hztcm.mindisle.db.PatientStateSnapshotsTable.userId eq EntityID(patientId, UsersTable)
+        }.orderBy(me.hztcm.mindisle.db.PatientStateSnapshotsTable.createdAt, SortOrder.DESC)
+            .limit(1)
+            .firstOrNull()
+            ?.get(me.hztcm.mindisle.db.PatientStateSnapshotsTable.riskLevel)
+            ?.name
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.openAlertCount(patientId: Long): Int {
+        return me.hztcm.mindisle.db.SafetyAlertsTable.selectAll().where {
+            (me.hztcm.mindisle.db.SafetyAlertsTable.userId eq EntityID(patientId, UsersTable)) and
+                (me.hztcm.mindisle.db.SafetyAlertsTable.status eq me.hztcm.mindisle.db.SafetyAlertStatus.OPEN)
+        }.count().toInt()
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.emaCompletionRate7d(
+        patientId: Long,
+        today: java.time.LocalDate
+    ): Double? {
+        val from = today.minusDays(6)
+        val count = me.hztcm.mindisle.db.EmaEntriesTable.selectAll().where {
+            (me.hztcm.mindisle.db.EmaEntriesTable.userId eq EntityID(patientId, UsersTable)) and
+                (me.hztcm.mindisle.db.EmaEntriesTable.localDate greaterEq from)
+        }.count().toInt()
+        if (count <= 0) return null
+        return (count.toDouble() / 14.0).coerceAtMost(1.0)
     }
 
     private fun org.jetbrains.exposed.sql.Transaction.loadLatestAssessmentSubmittedAtByPatient(

@@ -249,7 +249,10 @@ data class PatientMetricSnapshot(
     val phq9Total: Double? = null,
     val gad7Total: Double? = null,
     val psqiTotal: Double? = null,
-    val adherence: Double? = null
+    val adherence: Double? = null,
+    val riskLevel: String? = null,
+    val openAlertCount: Int? = null,
+    val emaCompletionRate7d: Double? = null
 )
 
 @Serializable

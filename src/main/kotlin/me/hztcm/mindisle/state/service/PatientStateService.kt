@@ -70,27 +70,42 @@ class PatientStateService(
 
             val emaRows = EmaEntriesTable.selectAll().where {
                 (EmaEntriesTable.userId eq userRef) and (EmaEntriesTable.localDate greaterEq fromDate)
-            }.toList()
-            val moodAvg = emaRows.map { it[EmaEntriesTable.mood].toDouble() }.takeIf { it.isNotEmpty() }?.average()
-            val sleepAvg = emaRows.mapNotNull { it[EmaEntriesTable.sleepQuality]?.toDouble() }.takeIf { it.isNotEmpty() }?.average()
+            }.orderBy(EmaEntriesTable.localDate, SortOrder.ASC).toList()
+            val moodSeries = emaRows.map { it[EmaEntriesTable.mood].toDouble() }
+            val moodAvg = moodSeries.takeIf { it.isNotEmpty() }?.average()
+            val moodVar = variance(moodSeries)
+            val moodSlope = linearSlope(moodSeries)
+            val sleepSeries = emaRows.mapNotNull { it[EmaEntriesTable.sleepQuality]?.toDouble() }
+            val sleepAvg = sleepSeries.takeIf { it.isNotEmpty() }?.average()
+            val sleepSlope = linearSlope(sleepSeries)
             val socialAvg = emaRows.mapNotNull { it[EmaEntriesTable.socialContact]?.toDouble() }.takeIf { it.isNotEmpty() }?.average()
             val lowActivityRatio = if (emaRows.isEmpty()) 0.0 else {
                 emaRows.count { it[EmaEntriesTable.activity] == EmaActivityLevel.LOW }.toDouble() / emaRows.size
             }
+            // Expected 2 slots/day over window (morning+evening); response rate for burden/deterioration.
+            val expectedSlots = 14.0
+            val emaResponseRate = (emaRows.size.toDouble() / expectedSlots).coerceIn(0.0, 1.5)
+            val moodDrop3d = consecutiveMoodDrop(emaRows, minDays = 3, minDrop = 2.0)
 
             val nlpFrom = now.minusDays(7)
             val nlpRows = AiNlpFeaturesTable.selectAll().where {
                 (AiNlpFeaturesTable.userId eq userRef) and (AiNlpFeaturesTable.createdAt greaterEq nlpFrom)
-            }.toList()
+            }.orderBy(AiNlpFeaturesTable.createdAt, SortOrder.ASC).toList()
             val ruminationHits = nlpRows.count { it[AiNlpFeaturesTable.ruminationHit] }
             val riskHits = nlpRows.count { it[AiNlpFeaturesTable.riskHit] }
             val avgPolarity = nlpRows.mapNotNull { it[AiNlpFeaturesTable.polarity] }.takeIf { it.isNotEmpty() }?.average()
+            val polaritySeries = nlpRows.mapNotNull { it[AiNlpFeaturesTable.polarity] }
+            val polaritySlope = linearSlope(polaritySeries)
+            val negIntensityAvg = nlpRows.mapNotNull { it[AiNlpFeaturesTable.negativeIntensity] }
+                .takeIf { it.isNotEmpty() }?.average()
 
             val scaleMeta = latestScaleMeta(userRef)
             val phq9 = scaleMeta.scores["PHQ9"]
             val gad7 = scaleMeta.scores["GAD7"]
             val psqi = scaleMeta.scores["PSQI"] ?: scaleMeta.scores["ISI"]
             val suicideFlag = scaleMeta.flags.contains("SUICIDE_RISK")
+            val phq9DeltaPrev = scaleMeta.deltas["PHQ9"]
+            val gad7DeltaPrev = scaleMeta.deltas["GAD7"]
 
             val sideEffectFrom = now.minusDays(14)
             val missedDoses = MedicationDoseLogsTable.selectAll().where {
@@ -147,6 +162,9 @@ class PatientStateService(
             val dims = listOf(lowMood, anxiety, rumination, sleep, activity, social, medDistress)
             val hasObservation = emaRows.isNotEmpty() || nlpRows.isNotEmpty() || scaleMeta.scores.isNotEmpty() ||
                 sideEffects > 0 || missedDoses > 0 || weights.isNotEmpty()
+            val deteriorating = moodDrop3d ||
+                (emaResponseRate < 0.35 && emaRows.isNotEmpty()) ||
+                (polaritySlope != null && polaritySlope <= -0.15)
             // Crisis HIGH is reserved for self-harm/NLP risk, med safety severe, or severe PHQ-9.
             // Symptom SEVERE alone (e.g. sleep) maps to MEDIUM so it still drives intervention.
             val risk = when {
@@ -154,18 +172,35 @@ class PatientStateService(
                     (phq9 != null && phq9 >= 20) -> RiskLevel.HIGH
                 !hasObservation -> RiskLevel.LOW
                 dims.any { it == SeverityLevel.SEVERE || it == SeverityLevel.MODERATE } ||
-                    (phq9 != null && phq9 >= 10) -> RiskLevel.MEDIUM
+                    (phq9 != null && phq9 >= 10) || deteriorating -> RiskLevel.MEDIUM
                 else -> RiskLevel.LOW
             }
 
+            val usageCount = me.hztcm.mindisle.db.AppUsageEventsTable.selectAll().where {
+                (me.hztcm.mindisle.db.AppUsageEventsTable.userId eq userRef) and
+                    (me.hztcm.mindisle.db.AppUsageEventsTable.createdAt greaterEq nlpFrom)
+            }.count().toInt()
+
             val features = mapOf(
                 "moodAvg7d" to (moodAvg?.let { "%.1f".format(it) } ?: "n/a"),
+                "moodVar7d" to (moodVar?.let { "%.2f".format(it) } ?: "n/a"),
+                "moodSlope7d" to (moodSlope?.let { "%.2f".format(it) } ?: "n/a"),
+                "sleepAvg7d" to (sleepAvg?.let { "%.1f".format(it) } ?: "n/a"),
+                "sleepSlope7d" to (sleepSlope?.let { "%.2f".format(it) } ?: "n/a"),
+                "emaResponseRate7d" to "%.2f".format(emaResponseRate),
+                "moodDrop3d" to moodDrop3d.toString(),
+                "deteriorating" to deteriorating.toString(),
                 "phq9" to (phq9?.toString() ?: "n/a"),
+                "phq9DeltaPrev" to (phq9DeltaPrev?.let { "%.1f".format(it) } ?: "n/a"),
                 "gad7" to (gad7?.toString() ?: "n/a"),
+                "gad7DeltaPrev" to (gad7DeltaPrev?.let { "%.1f".format(it) } ?: "n/a"),
                 "psqi" to (psqi?.toString() ?: "n/a"),
                 "missedDoses7d" to missedDoses.toString(),
                 "weightGainPct" to "%.1f".format(weightGainPct),
                 "nlpRiskHits7d" to riskHits.toString(),
+                "polaritySlope7d" to (polaritySlope?.let { "%.2f".format(it) } ?: "n/a"),
+                "negIntensityAvg7d" to (negIntensityAvg?.let { "%.2f".format(it) } ?: "n/a"),
+                "appUsageEvents7d" to usageCount.toString(),
                 "suicideFlag" to suicideFlag.toString(),
                 "observed" to hasObservation.toString()
             )
@@ -225,7 +260,8 @@ class PatientStateService(
 
     private data class ScaleMeta(
         val scores: Map<String, Double>,
-        val flags: Set<String>
+        val flags: Set<String>,
+        val deltas: Map<String, Double>
     )
 
     private fun org.jetbrains.exposed.sql.Transaction.latestScaleMeta(
@@ -237,6 +273,7 @@ class PatientStateService(
         }.orderBy(UserScaleSessionsTable.submittedAt, SortOrder.DESC).limit(30).toList()
 
         val scores = linkedMapOf<String, Double>()
+        val previous = linkedMapOf<String, Double>()
         val flags = linkedSetOf<String>()
         for (session in sessions) {
             val scaleCode = ScalesTable.selectAll().where {
@@ -245,15 +282,59 @@ class PatientStateService(
             val resultRow = UserScaleResultsTable.selectAll().where {
                 UserScaleResultsTable.sessionId eq session[UserScaleSessionsTable.id]
             }.firstOrNull() ?: continue
+            val total = resultRow[UserScaleResultsTable.totalScore]?.toDouble() ?: continue
             if (!scores.containsKey(scaleCode)) {
-                resultRow[UserScaleResultsTable.totalScore]?.toDouble()?.let { scores[scaleCode] = it }
+                scores[scaleCode] = total
+            } else if (!previous.containsKey(scaleCode)) {
+                previous[scaleCode] = total
             }
             val detail = resultRow[UserScaleResultsTable.resultDetailJson]
             if (!detail.isNullOrBlank() && detail.contains("SUICIDE_RISK")) {
                 flags += "SUICIDE_RISK"
             }
         }
-        return ScaleMeta(scores = scores, flags = flags)
+        val deltas = scores.mapNotNull { (code, latest) ->
+            val prev = previous[code] ?: return@mapNotNull null
+            code to (latest - prev)
+        }.toMap()
+        return ScaleMeta(scores = scores, flags = flags, deltas = deltas)
+    }
+
+    private fun variance(values: List<Double>): Double? {
+        if (values.size < 2) return null
+        val mean = values.average()
+        return values.sumOf { (it - mean) * (it - mean) } / values.size
+    }
+
+    private fun linearSlope(values: List<Double>): Double? {
+        if (values.size < 2) return null
+        val n = values.size.toDouble()
+        val xs = values.indices.map { it.toDouble() }
+        val xMean = xs.average()
+        val yMean = values.average()
+        val denom = xs.sumOf { (it - xMean) * (it - xMean) }
+        if (denom == 0.0) return 0.0
+        val numer = xs.zip(values).sumOf { (x, y) -> (x - xMean) * (y - yMean) }
+        return numer / denom
+    }
+
+    private fun consecutiveMoodDrop(
+        emaRows: List<org.jetbrains.exposed.sql.ResultRow>,
+        minDays: Int,
+        minDrop: Double
+    ): Boolean {
+        if (emaRows.size < minDays) return false
+        val byDay = emaRows.groupBy { it[EmaEntriesTable.localDate] }
+            .toSortedMap()
+            .mapValues { (_, rows) -> rows.map { it[EmaEntriesTable.mood].toDouble() }.average() }
+            .entries.toList()
+        if (byDay.size < minDays) return false
+        val window = byDay.takeLast(minDays)
+        var drops = 0
+        for (i in 1 until window.size) {
+            if (window[i - 1].value - window[i].value >= minDrop) drops += 1
+        }
+        return drops >= minDays - 1
     }
 
     private fun levelByMood(moodAvg: Double?, phq9: Double?, polarity: Double?): SeverityLevel {

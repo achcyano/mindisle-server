@@ -28,6 +28,8 @@ import me.hztcm.mindisle.scale.api.registerScaleWebRoutes
 import me.hztcm.mindisle.scale.service.ScaleService
 import me.hztcm.mindisle.state.service.PatientStateService
 import me.hztcm.mindisle.task.service.UiTaskService
+import me.hztcm.mindisle.research.ResearchService
+import me.hztcm.mindisle.research.registerResearchRoutes
 import me.hztcm.mindisle.user.api.registerAuthRoutes
 import me.hztcm.mindisle.user.api.registerUserRoutes
 import me.hztcm.mindisle.user.service.UserManagementService
@@ -45,7 +47,8 @@ fun Application.configureRouting(
     uiTaskService: UiTaskService,
     interventionService: InterventionService,
     safetyAlertService: SafetyAlertService,
-    nlpService: AiNlpService
+    nlpService: AiNlpService,
+    researchService: ResearchService
 ) {
     routing {
         get("/") {
@@ -70,6 +73,7 @@ fun Application.configureRouting(
             registerDoctorRoutes(doctorService)
             registerDoctorAdaptiveRoutes(stateService, safetyAlertService, nlpService)
             registerEventRoutes(eventService)
+            registerResearchRoutes(researchService)
         }
     }
 }

@@ -23,6 +23,8 @@ import me.hztcm.mindisle.common.utcNow
 import me.hztcm.mindisle.db.AppUsageEventsTable
 import me.hztcm.mindisle.db.DatabaseFactory
 import me.hztcm.mindisle.db.UsersTable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.insert
 
@@ -73,11 +75,12 @@ fun Route.registerEmaRoutes(
                 DatabaseFactory.dbQuery {
                     val userRef = EntityID(userId, UsersTable)
                     val now = utcNow()
+                    val json = Json { encodeDefaults = true }
                     body.events.take(50).forEach { event ->
                         AppUsageEventsTable.insert {
                             it[AppUsageEventsTable.userId] = userRef
                             it[eventType] = event.eventType.take(64)
-                            it[payloadJson] = event.payload.entries.joinToString(",") { e -> "${e.key}=${e.value}" }
+                            it[payloadJson] = json.encodeToString(event.payload)
                             it[createdAt] = now
                         }
                     }

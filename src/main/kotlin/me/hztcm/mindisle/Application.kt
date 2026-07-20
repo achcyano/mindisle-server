@@ -104,6 +104,7 @@ fun Application.module() {
         stateService = stateService
     )
     val eventService = EventService()
+    val researchService = me.hztcm.mindisle.research.ResearchService()
 
     configureStatusPages()
     configureAuth(jwtService)
@@ -120,7 +121,8 @@ fun Application.module() {
         uiTaskService = uiTaskService,
         interventionService = interventionService,
         safetyAlertService = safetyAlertService,
-        nlpService = nlpService
+        nlpService = nlpService,
+        researchService = researchService
     )
 
     monitor.subscribe(ApplicationStopping) {
