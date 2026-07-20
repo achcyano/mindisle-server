@@ -30,6 +30,7 @@ import java.time.LocalDateTime
 class EventService {
     private companion object {
         const val DEFAULT_SCALE_REDO_INTERVAL_DAYS = 30
+        const val BIWEEKLY_SCALE_REDO_INTERVAL_DAYS = 14
         const val PROFILE_UPDATE_INTERVAL_MONTHS = 1
 
         const val EVENT_SCALE_REDO_DUE = "SCALE_REDO_DUE"
@@ -37,12 +38,14 @@ class EventService {
         const val EVENT_DOCTOR_BIND_REQUIRED = "DOCTOR_BIND_REQUIRED"
         const val EVENT_MEDICATION_PLAN_EMPTY = "MEDICATION_PLAN_EMPTY"
         const val EVENT_PROFILE_UPDATE_MONTHLY = "PROFILE_UPDATE_MONTHLY"
+        const val EVENT_EMA_DUE = "EMA_DUE"
 
         const val EVENT_TYPE_OPEN_SCALE = "OPEN_SCALE"
         const val EVENT_TYPE_CONTINUE_SCALE_SESSION = "CONTINUE_SCALE_SESSION"
         const val EVENT_TYPE_BIND_DOCTOR = "BIND_DOCTOR"
         const val EVENT_TYPE_IMPORT_MEDICATION_PLAN = "IMPORT_MEDICATION_PLAN"
         const val EVENT_TYPE_UPDATE_BASIC_PROFILE = "UPDATE_BASIC_PROFILE"
+        const val EVENT_TYPE_OPEN_EMA = "OPEN_EMA"
     }
 
     suspend fun listEvents(userId: Long): UserEventListResponse {
@@ -53,6 +56,7 @@ class EventService {
             val userCreatedAt = user[UsersTable.createdAt]
 
             val drafts = mutableListOf<EventDraft>()
+            appendEmaDueEvents(userRef, now, drafts)
             appendScaleRedoEvents(userRef, userCreatedAt, now, drafts)
             appendInProgressScaleEvents(userRef, drafts)
             appendDoctorBindingEvent(userRef, userCreatedAt, now, drafts)
@@ -116,23 +120,73 @@ class EventService {
             val scaleRow = scalesById[scaleId] ?: return@forEach
             val versionRow = latestVersionByScaleId.getValue(scaleId)
             val delivery = parseEventScaleDelivery(versionRow[ScaleVersionsTable.configJson])
+            val scaleCode = scaleRow[ScalesTable.code]
+            val defaultInterval = when (scaleCode.uppercase()) {
+                "PHQ9", "GAD7" -> BIWEEKLY_SCALE_REDO_INTERVAL_DAYS
+                else -> DEFAULT_SCALE_REDO_INTERVAL_DAYS
+            }
             val intervalDays = parseRedoIntervalDays(
                 configJson = versionRow[ScaleVersionsTable.configJson],
-                defaultValue = DEFAULT_SCALE_REDO_INTERVAL_DAYS
+                defaultValue = defaultInterval
             )
-            val anchor = lastSubmittedByScaleId[scaleId] ?: userCreatedAt
-            val dueAt = nextRecurringDueByDays(anchor, intervalDays, now)
+            val lastSubmitted = lastSubmittedByScaleId[scaleId]
+            // Only surface due events when overdue (or never submitted after account age window).
+            val dueAt = if (lastSubmitted == null) {
+                userCreatedAt.plusDays(1)
+            } else {
+                lastSubmitted.plusDays(intervalDays.toLong())
+            }
+            if (dueAt.isAfter(now)) {
+                return@forEach
+            }
             output += EventDraft(
                 eventName = EVENT_SCALE_REDO_DUE,
                 eventType = EVENT_TYPE_OPEN_SCALE,
                 dueAt = dueAt,
                 payload = buildJsonObject {
                     put("scaleId", scaleId)
-                    put("scaleCode", scaleRow[ScalesTable.code])
+                    put("scaleCode", scaleCode)
                     put("scaleName", scaleRow[ScalesTable.name])
                     put("intervalDays", intervalDays)
                     put("deliveryMode", delivery.mode.name)
                     delivery.webPath?.let { put("webPath", it) }
+                }
+            )
+        }
+    }
+
+    private fun org.jetbrains.exposed.sql.Transaction.appendEmaDueEvents(
+        userId: EntityID<Long>,
+        now: LocalDateTime,
+        output: MutableList<EventDraft>
+    ) {
+        val today = now.toLocalDatePlus8()
+        val completedSlots = me.hztcm.mindisle.db.EmaEntriesTable.selectAll().where {
+            (me.hztcm.mindisle.db.EmaEntriesTable.userId eq userId) and
+                (me.hztcm.mindisle.db.EmaEntriesTable.localDate eq today)
+        }.map { it[me.hztcm.mindisle.db.EmaEntriesTable.slot].name }.toSet()
+
+        val hourPlus8 = now.atOffset(java.time.ZoneOffset.UTC)
+            .withOffsetSameInstant(java.time.ZoneOffset.ofHours(8))
+            .hour
+        val pending = mutableListOf<String>()
+        if (hourPlus8 < 15 && "MORNING" !in completedSlots && "ADHOC" !in completedSlots) {
+            pending += "MORNING"
+        }
+        if (hourPlus8 >= 15 && "EVENING" !in completedSlots && "ADHOC" !in completedSlots) {
+            pending += "EVENING"
+        }
+        if (pending.isEmpty() && completedSlots.isEmpty()) {
+            pending += "ADHOC"
+        }
+        pending.forEach { slot ->
+            output += EventDraft(
+                eventName = EVENT_EMA_DUE,
+                eventType = EVENT_TYPE_OPEN_EMA,
+                dueAt = now,
+                payload = buildJsonObject {
+                    put("slot", slot)
+                    put("title", "完成今日心情简评")
                 }
             )
         }

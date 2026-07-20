@@ -21,6 +21,12 @@ internal fun LocalDateTime.toIsoOffsetPlus8(): String {
         .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
 }
 
+internal fun LocalDateTime.toLocalDatePlus8(): java.time.LocalDate {
+    return atOffset(ZoneOffset.UTC)
+        .withOffsetSameInstant(ZoneOffset.ofHours(8))
+        .toLocalDate()
+}
+
 internal fun nextRecurringDueByDays(anchor: LocalDateTime, intervalDays: Int, now: LocalDateTime): LocalDateTime {
     require(intervalDays > 0) { "intervalDays must be positive" }
     return anchor.plusDays(intervalDays.toLong())

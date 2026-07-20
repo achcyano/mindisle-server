@@ -66,7 +66,7 @@ fun Application.module() {
     val doseLogService = DoseLogService(stateService)
     val uiTaskService = UiTaskService()
     val interventionService = InterventionService(uiTaskService)
-    val emaService = EmaService(stateService)
+    val emaService = EmaService(stateService, interventionService)
     val contextAssembler = PatientContextAssembler(stateService, doseLogService)
     val toolRegistry = buildDefaultToolRegistry(
         stateService = stateService,

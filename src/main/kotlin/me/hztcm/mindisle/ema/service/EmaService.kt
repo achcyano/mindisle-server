@@ -14,6 +14,7 @@ import me.hztcm.mindisle.db.EmaActivityLevel
 import me.hztcm.mindisle.db.EmaEntriesTable
 import me.hztcm.mindisle.db.EmaSlot
 import me.hztcm.mindisle.db.UsersTable
+import me.hztcm.mindisle.intervention.service.InterventionService
 import me.hztcm.mindisle.model.CreateEmaRequest
 import me.hztcm.mindisle.model.EmaEntryResponse
 import me.hztcm.mindisle.model.EmaListResponse
@@ -28,7 +29,8 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
 
 class EmaService(
-    private val stateService: PatientStateService
+    private val stateService: PatientStateService,
+    private val interventionService: InterventionService? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -97,7 +99,10 @@ class EmaService(
             }
             EmaEntriesTable.selectAll().where { EmaEntriesTable.id eq id }.first().toResponse()
         }
-        runCatching { stateService.recompute(userId, source = "EMA_SUBMIT") }
+        runCatching {
+            val state = stateService.recompute(userId, source = "EMA_SUBMIT")
+            interventionService?.matchFromState(userId, state, triggerType = "EMA_SUBMIT")
+        }
         return entry
     }
 
